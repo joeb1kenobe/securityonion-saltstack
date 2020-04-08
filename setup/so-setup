@@ -17,8 +17,10 @@
 
 # Source the other pieces of the setup
 SCRIPTDIR=$(dirname "$0")
-source $SCRIPTDIR/so-functions
-source $SCRIPTDIR/so-whiptail
+# shellcheck source=/dev/null
+source "$SCRIPTDIR/so-functions"
+# shellcheck source=/dev/null
+source "$SCRIPTDIR/so-whiptail"
 
 # See if this is an ISO install
 OPTIONS=$1
@@ -34,26 +36,26 @@ export PATH=$PATH:../salt/common/tools/sbin
 
 # Global Variables
 HOSTNAME=$(cat /etc/hostname)
-TOTAL_MEM=`grep MemTotal /proc/meminfo | awk '{print $2}' | sed -r 's/.{3}$//'`
+TOTAL_MEM=$(grep MemTotal /proc/meminfo | awk '{print $2}' | sed -r 's/.{3}$//')
 NICS=$(ip link | awk -F: '$0 !~ "lo|vir|veth|br|docker|wl|^[^0-9]"{print $2 " \"" "Interface" "\"" " OFF"}')
-CPUCORES=$(cat /proc/cpuinfo | grep processor | wc -l)
-LISTCORES=$(cat /proc/cpuinfo | grep processor | awk '{print $3 " \"" "core" "\""}')
-RANDOMUID=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+CPUCORES=$(grep -c "processor" /proc/cpuinfo)
+LISTCORES=$(grep "processor" /proc/cpuinfo | awk '{print $3 " \"" "core" "\""}')
+RANDOMUID=$(</dev/urandom tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
 NODE_ES_PORT="9200"
 SETUPLOG="/root/sosetup.log"
 # End Global Variables
 
 # Reset the Install Log
-date -u >$SETUPLOG 2>&1
+date -u > $SETUPLOG 2>&1
 echo "stty size is: $(stty size)" >> $SETUPLOG 2>&1
 
 # Check for prerequisites
 got_root
 detect_os
 
-if [ $OS == ubuntu ]; then
+if [ "$OS" == ubuntu ]; then
   # Override the horrible Ubuntu whiptail color pallete
-  update-alternatives --set newt-palette /etc/newt/palette.original
+  update-alternatives --set newt-palette /etc/newt/palette.original >> $SETUPLOG 2>&1
 fi
 
 # Question Time
@@ -61,7 +63,7 @@ echo "Asking user if they are sure they want to proceed" >> $SETUPLOG 2>&1
 if (whiptail_you_sure) ; then
 
   # Create a temp dir to get started
-  install_prep
+  install_prep >> $SETUPLOG 2>&1
   setterm -blank 0
 
   if [ $INSTALLMETHOD == network ]; then
@@ -84,7 +86,7 @@ if (whiptail_you_sure) ; then
     whiptail_dhcp_or_static
 
     # Do this if it static is selected
-    if [ $ADDRESSTYPE != 'DHCP' ]; then
+    if [ "$ADDRESSTYPE" != 'DHCP' ]; then
       whiptail_management_interface_ip
       whiptail_management_interface_mask
       whiptail_management_interface_gateway
@@ -114,8 +116,8 @@ if (whiptail_you_sure) ; then
 
   # What kind of install are we doing?
   whiptail_install_type
-  SHORTNAME=$(echo $HOSTNAME | awk -F. {'print $1'})
-  MINION_ID=$(echo $SHORTNAME'_'$INSTALLTYPE | tr '[:upper:]' '[:lower:]')
+  SHORTNAME=$(echo "$HOSTNAME" | awk -F. '{print $1}')
+  MINION_ID=$(echo "$SHORTNAME'_'$INSTALLTYPE" | tr '[:upper:]' '[:lower:]')
   echo "MINION_ID = $MINION_ID" >> $SETUPLOG 2>&1
 
   # How do we want to handle OS patching? manual, auto or scheduled days and hours
@@ -130,10 +132,10 @@ if (whiptail_you_sure) ; then
     'Import Schedule')
       whiptail_patch_schedule_import
       ;;
-    Automatic)
+    'Automatic')
       PATCHSCHEDULENAME=auto
       ;;
-    Manual)
+    'Manual')
       PATCHSCHEDULENAME=manual
       ;;
   esac
@@ -141,21 +143,23 @@ if (whiptail_you_sure) ; then
   ####################
   ##      Helix     ##
   ####################
-  if [ $INSTALLTYPE == 'HELIXSENSOR' ]; then
+  if [ $"INSTALLTYPE" == 'HELIXSENSOR' ]; then
     MASTERUPDATES=OPEN
     filter_unused_nics
-    [[ $SKIP_BOND != 'yes' ]] && whiptail_bond_nics
+    [[ "$SKIP_BOND" != 'yes' ]] && whiptail_bond_nics
     whiptail_helix_apikey
     whiptail_homenet_master
     RULESETUP=ETOPEN
     NSMSETUP=BASIC
     HNSENSOR=inherit
     LS_HEAP_SIZE="1000m"
-    calculate_useable_cores
+    calculate_useable_cores >> "$SETUPLOG" 2>&1
     whiptail_make_changes
-    set_hostname
-    set_version
-    clear_master
+    {
+      set_hostname;
+      set_version;
+      clear_master;
+    } >> "$SETUPLOG" 2>&1
     mkdir -p /nsm
     get_filesystem_root
     get_filesystem_nsm
@@ -247,36 +251,11 @@ if (whiptail_you_sure) ; then
 
   fi
 
-  function collect_webuser_inputs() {
-    # Get a password for the web admin user
-    VALIDUSER=no
-    while [ $VALIDUSER != yes ]; do
-      whiptail_create_web_user
-      so-user valemail "$WEBUSER"
-      if [ $? == 0 ]; then
-        VALIDUSER=yes
-      else
-        whiptail_invalid_user_warning
-      fi
-    done
-
-    WPMATCH=no
-    while [ $WPMATCH != yes ]; do
-      whiptail_create_web_user_password1
-      echo "$WEBPASSWD1" | so-user valpass
-      if [ $? == 0 ]; then
-        whiptail_create_web_user_password2
-        check_web_pass
-      else
-        whiptail_invalid_pass_warning
-      fi
-    done
-  }
 
   ####################
   ##     Master     ##
   ####################
-  if [ $INSTALLTYPE == 'MASTER' ]; then
+  if [ "$INSTALLTYPE" == 'MASTER' ]; then
 
     # Would you like to do an advanced install?
     whiptail_master_adv
@@ -294,7 +273,7 @@ if (whiptail_you_sure) ; then
     whiptail_rule_setup
 
     # Get the code if it isn't ET Open
-    if [ $RULESETUP != 'ETOPEN' ]; then
+    if [ "$RULESETUP" != 'ETOPEN' ]; then
       # Get the code
       whiptail_oinkcode
     fi
@@ -305,9 +284,9 @@ if (whiptail_you_sure) ; then
     process_components
 
     # Do Advacned Setup if they chose it
-    if [ $MASTERADV == 'ADVANCED' ]; then
+    if [ "$MASTERADV" == 'ADVANCED' ]; then
       # Ask which bro logs to enable - Need to add Suricata check
-      if [ $BROVERSION != 'SURICATA' ]; then
+      if [ "$BROVERSION" != 'SURICATA' ]; then
         whiptail_master_adv_service_brologs
       fi
     fi
@@ -315,7 +294,7 @@ if (whiptail_you_sure) ; then
     # Get a password for the soremote user
     whiptail_create_soremote_user
     SCMATCH=no
-    while [ $SCMATCH != yes ]; do
+    while [ "$SCMATCH" != 'yes' ]; do
       whiptail_create_soremote_user_password1
       whiptail_create_soremote_user_password2
       check_soremote_pass
