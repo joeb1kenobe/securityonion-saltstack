@@ -23,26 +23,25 @@ SOVERSION=1.2.1
 accept_salt_key_local() {
 	echo "Accept the key locally on the master" >> "$SETUPLOG" 2>&1
 	# Accept the key locally on the master
-	salt-key -ya $MINION_ID
+	salt-key -ya "$MINION_ID"
 
 }
 
 accept_salt_key_remote() {
 	echo "Accept the key remotely on the master" >> "$SETUPLOG" 2>&1
 	# Delete the key just in case.
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo salt-key -d $MINION_ID -y
+	ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo salt-key -d "$MINION_ID" -y
 	salt-call state.apply ca
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo salt-key -a $MINION_ID -y
+	ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo salt-key -a "$MINION_ID" -y
 
 }
 
 
 add_admin_user() {
-
-	# Add an admin user with full sudo rights if this is an ISO install.
-	useradd $ADMINUSER && echo $ADMINUSER:$ADMINPASS1 | chpasswd --crypt-method=SHA512
-	usermod -aG wheel $ADMINUSER
-
+	# Add an admin user with full sudo rights if this is an ISO install. 
+	useradd "$ADMINUSER"
+	echo "$ADMINUSER":"$ADMINPASS1" | chpasswd --crypt-method=SHA512
+	usermod -aG wheel "$ADMINUSER"
 }
 
 add_master_hostfile() {
@@ -53,46 +52,41 @@ add_master_hostfile() {
 
 	local exitstatus=$?
 	whiptail_check_exitstatus $exitstatus
+}
 
+# $1 => username
+# $2 => uid
+# $3 => gid
+# $4 => home dir
+# $5 => create home dir
+# $6 => (optional) password variable
+so_add_user() {
+	echo "Add $1 user" >> "$SETUPLOG" 2>&1
+	groupadd --gid "$3" "$1"
+	
+
+	if [ "$5" == 0 ]; then
+		useradd --uid "$2" --gid "$3" --home-dir "$4" --no-create-home "$1"
+	else
+		useradd --uid "$2" --gid "$3" --home-dir "$4" "$1"
+	fi
+	
+	# If a password has been passed in, set the password
+	if [ "$6" ]; then
+		echo "$1":"$6" | chpasswd --crypt-method=SHA512
+	fi
 }
 
 add_socore_user_master() {
-
-	echo "Add socore on the master" >>~/sosetup.log 2>&1
-	# Add user "socore" to the master. This will be for things like accepting keys.
-	if [ $OS == 'centos' ]; then
-		local ADDUSER=adduser
-	else
-		local ADDUSER=useradd
-	fi
-	groupadd --gid 939 socore
-	$ADDUSER --uid 939 --gid 939 --home-dir /opt/so socore
-
+	so_add_user "socore" "939" "939" "/opt/so" 1
 }
 
 add_soremote_user_master() {
-
-	echo "Add soremote on the master" >>~/sosetup.log 2>&1
-	# Add user "soremote" to the master. This will be for things like accepting keys.
-	if [ $OS == 'centos' ]; then
-		local ADDUSER=adduser
-	else
-		local ADDUSER=useradd
-	fi
-	groupadd --gid 947 soremote
-	$ADDUSER --uid 947 --gid 947 soremote
-	
-	# Set the password for soremote that we got during setup
-	echo soremote:$SOREMOTEPASS1 | chpasswd --crypt-method=SHA512
-
+	so_add_user "soremote" "947" "947" "/home/soremote" 1 "$SOREMOTEPASS1"
 }
 
 add_socore_user_notmaster() {
-	echo "Add socore user on non master" >> "$SETUPLOG" 2>&1
-	# Add socore user to the non master system. Probably not a bad idea to make system user
-	groupadd --gid 939 socore
-	$ADDUSER --uid 939 --gid 939 --home-dir /opt/so --no-create-home socore
-
+	so_add_user "soremote" "939" "939" "/opt/so" 0
 }
 
 wait_for_identity_db_to_exist() {
@@ -102,35 +96,35 @@ wait_for_identity_db_to_exist() {
 	# Check and see if the DB file is in there
 	if [ -f /opt/so/conf/kratos/db/db.sqlite ]; then
 	  echo "Database file exists at $(date)"
-	  attempts=$MAXATTEMPTS
+	  return 0
 	else
 	  echo "Identity database does not yet exist; waiting 5 seconds and will check again ($attempts/$MAXATTEMPTS)..."
 	  sleep 5
 	  attempts=$((attempts+1))      
 	fi
   done
+  return 1
 }
 
 add_web_user() {
   wait_for_identity_db_to_exist
   echo "Attempting to add administrator user for web interface..."
-  echo "$WEBPASSWD1" | /usr/sbin/so-user add $WEBUSER
+  echo "$WEBPASSWD1" | /usr/sbin/so-user add "$WEBUSER"
   echo "Add user result: $?"
 }
 
 # Create an secrets pillar so that passwords survive re-install
 secrets_pillar(){
-
   if [ ! -f /opt/so/saltstack/pillar/secrets.sls ]; then
 	echo "Creating Secrets Pillar" >> "$SETUPLOG" 2>&1
 	mkdir -p /opt/so/saltstack/pillar
-	echo "secrets:" >> /opt/so/saltstack/pillar/secrets.sls
-	echo "  mysql: $MYSQLPASS" >> /opt/so/saltstack/pillar/secrets.sls
-	echo "  fleet: $FLEETPASS" >> /opt/so/saltstack/pillar/secrets.sls
-	echo "  fleet_jwt: $FLEETJWT" >> /opt/so/saltstack/pillar/secrets.sls
-	echo "  fleet_enroll-secret: False" >> /opt/so/saltstack/pillar/secrets.sls
+	printf '%s\n'\
+		"secrets:"\
+		"  mysql: $MYSQLPASS"\
+		"  fleet: $FLEETPASS"\
+		"  fleet_jwt: $FLEETJWT"\
+		"  fleet_enroll-secret: False" >> /opt/so/saltstack/pillar/secrets.sls
   fi
-
 }
 
 # Enable Bro Logs
@@ -140,56 +134,57 @@ bro_logs_enabled() {
 	echo "brologs:" > pillar/brologs.sls
 	echo "  enabled:" >> pillar/brologs.sls
 
-	if [ $MASTERADV == 'ADVANCED' ]; then
-		for BLOG in ${BLOGS[@]}; do
+	if [ "$MASTERADV" == 'ADVANCED' ]; then
+		for BLOG in "${BLOGS[@]}"; do
 			echo "    - $BLOG" | tr -d '"' >> pillar/brologs.sls
 		done
 	else
-		echo "    - conn" >> pillar/brologs.sls
-		echo "    - dce_rpc" >> pillar/brologs.sls
-		echo "    - dhcp" >> pillar/brologs.sls
-		echo "    - dhcpv6" >> pillar/brologs.sls
-		echo "    - dnp3" >> pillar/brologs.sls
-		echo "    - dns" >> pillar/brologs.sls
-		echo "    - dpd" >> pillar/brologs.sls
-		echo "    - files" >> pillar/brologs.sls
-		echo "    - ftp" >> pillar/brologs.sls
-		echo "    - http" >> pillar/brologs.sls
-		echo "    - intel" >> pillar/brologs.sls
-		echo "    - irc" >> pillar/brologs.sls
-		echo "    - kerberos" >> pillar/brologs.sls
-		echo "    - modbus" >> pillar/brologs.sls
-		echo "    - mqtt" >> pillar/brologs.sls
-		echo "    - notice" >> pillar/brologs.sls
-		echo "    - ntlm" >> pillar/brologs.sls
-		echo "    - openvpn" >> pillar/brologs.sls
-		echo "    - pe" >> pillar/brologs.sls
-		echo "    - radius" >> pillar/brologs.sls
-		echo "    - rfb" >> pillar/brologs.sls
-		echo "    - rdp" >> pillar/brologs.sls
-		echo "    - signatures" >> pillar/brologs.sls
-		echo "    - sip" >> pillar/brologs.sls
-		echo "    - smb_files" >> pillar/brologs.sls
-		echo "    - smb_mapping" >> pillar/brologs.sls
-		echo "    - smtp" >> pillar/brologs.sls
-		echo "    - snmp" >> pillar/brologs.sls
-		echo "    - software" >> pillar/brologs.sls
-		echo "    - ssh" >> pillar/brologs.sls
-		echo "    - ssl" >> pillar/brologs.sls
-		echo "    - syslog" >> pillar/brologs.sls
-		echo "    - telnet" >> pillar/brologs.sls
-		echo "    - tunnel" >> pillar/brologs.sls
-		echo "    - weird" >> pillar/brologs.sls
-		echo "    - mysql" >> pillar/brologs.sls
-		echo "    - socks" >> pillar/brologs.sls
-		echo "    - x509" >> pillar/brologs.sls
+		printf '%s\n'\
+			"    - conn"\
+			"    - dce_rpc"\
+			"    - dhcp"\
+			"    - dhcpv6"\
+			"    - dnp3"\
+			"    - dns"\
+			"    - dpd"\
+			"    - files"\
+			"    - ftp"\
+			"    - http"\
+			"    - intel"\
+			"    - irc"\
+			"    - kerberos"\
+			"    - modbus"\
+			"    - mqtt"\
+			"    - notice"\
+			"    - ntlm"\
+			"    - openvpn"\
+			"    - pe"\
+			"    - radius"\
+			"    - rfb"\
+			"    - rdp"\
+			"    - signatures"\
+			"    - sip"\
+			"    - smb_files"\
+			"    - smb_mapping"\
+			"    - smtp"\
+			"    - snmp"\
+			"    - software"\
+			"    - ssh"\
+			"    - ssl"\
+			"    - syslog"\
+			"    - telnet"\
+			"    - tunnel"\
+			"    - weird"\
+			"    - mysql"\
+			"    - socks"\
+			"    - x509" >> pillar/brologs.sls
 	fi
 }
 
 calculate_useable_cores() {
 
 	# Calculate reasonable core usage
-	local CORES4BRO=$(( $CPUCORES/2 - 1 ))
+	local CORES4BRO=$(( CPUCORES/2 - 1 ))
 	LBPROCSROUND=$(printf "%.0f\n" $CORES4BRO)
 	# We don't want it to be 0
 	if [ "$LBPROCSROUND" -lt 1 ]; then
@@ -201,30 +196,24 @@ calculate_useable_cores() {
 }
 
 check_admin_pass() {
-
-	if [ $ADMINPASS1 == $ADMINPASS2 ]; then
-		APMATCH=yes
-	else
-		whiptail_passwords_dont_match
-	fi
-
+	check_pass_match "$ADMINPASS1" "$ADMINPASS2" "APMATCH"
 }
 
 check_hive_init_then_reboot() {
 	WAIT_STEP=0
 	MAX_WAIT=100
-		until [ -f /opt/so/state/thehive.txt ] ; do
-		WAIT_STEP=$(( ${WAIT_STEP} + 1 ))
-		echo "Waiting on the_hive to init...Attempt #$WAIT_STEP"
-			if [ ${WAIT_STEP} -gt ${MAX_WAIT} ]; then
-					echo "ERROR: We waited ${MAX_WAIT} seconds but the_hive is not working."
-					exit 5
-			fi
-				sleep 1s;
-		done
-		docker stop so-thehive
-		docker rm so-thehive
-		shutdown -r now
+	until [ -f /opt/so/state/thehive.txt ] ; do
+	WAIT_STEP=$(( WAIT_STEP + 1 ))
+	echo "Waiting on the_hive to init ($WAIT_STEP/$MAX_WAIT)..."
+		if [ ${WAIT_STEP} -gt ${MAX_WAIT} ]; then
+			echo "ERROR: We waited ${MAX_WAIT} seconds but the_hive is not working."
+			return 5
+		fi
+		sleep 1s;
+	done
+	docker stop so-thehive
+	docker rm so-thehive
+	shutdown -r now
 }
 
 check_network_manager_conf() {
@@ -251,24 +240,23 @@ check_network_manager_conf() {
 	fi
 }
 
-check_soremote_pass() {
-
-	if [ $SOREMOTEPASS1 == $SOREMOTEPASS2 ]; then
-		SCMATCH=yes
+# $1 => password
+# $2 => confirm password
+# $3 => variable to set
+check_pass_match() {
+	if [ "$1" == "$2" ]; then
+		eval "$3"="\"yes\""
 	else
 		whiptail_passwords_dont_match
 	fi
+}
 
+check_soremote_pass() {
+	check_pass_match "$SOREMOTEPASS1" "$SOREMOTEPASS2" "SCMATCH"
 }
 
 check_web_pass() {
-
-  if [ $WEBPASSWD1 == $WEBPASSWD2 ]; then
-	WPMATCH=yes
-  else
-	whiptail_passwords_dont_match
-  fi
-
+	check_pass_match "$WEBPASSWD1" "$WEBPASSWD2" "WPMATCH"
 }
 
 checkin_at_boot() {
@@ -325,22 +313,23 @@ configure_minion() {
   echo "Configuring minion type as $TYPE" >> "$SETUPLOG" 2>&1
   touch /etc/salt/grains
   echo "role: so-$TYPE" > /etc/salt/grains
-  if [ $TYPE == 'master' ] || [ $TYPE == 'eval' ] || [ $TYPE == 'mastersearch' ]; then
+  if [ "$TYPE" == 'master' ] || [ "$TYPE" == 'eval' ] || [ "$TYPE" == 'mastersearch' ]; then
 	echo "master: $HOSTNAME" > /etc/salt/minion
-	echo "id: $MINION_ID" >> /etc/salt/minion
-	echo "mysql.host: '$MAINIP'" >> /etc/salt/minion
-	echo "mysql.port: 3306" >> /etc/salt/minion
-	echo "mysql.user: 'root'" >> /etc/salt/minion
+	printf '%s\n'\
+		"id: $MINION_ID"\
+		"mysql.host: '$MAINIP'"\
+		"mysql.port: 3306"\
+		"mysql.user: 'root'" >> /etc/salt/minion
 	if [ ! -f /opt/so/saltstack/pillar/secrets.sls ]; then
 	  echo "mysql.pass: '$MYSQLPASS'" >> /etc/salt/minion
 	else
-	  OLDPASS=$(cat /opt/so/saltstack/pillar/secrets.sls | grep mysql | awk {'print $2'})
+	  OLDPASS=$(grep "mysql" /opt/so/saltstack/pillar/secrets.sls | awk '{print $2}')
 	  echo "mysql.pass: '$OLDPASS'" >> /etc/salt/minion
 	fi
-  elif [ $TYPE == 'helix' ]; then
+  elif [ "$TYPE" == 'helix' ]; then
 	echo "master: $HOSTNAME" > /etc/salt/minion
 	echo "id: $MINION_ID" >> /etc/salt/minion
-  elif [ $TYPE == 'fleet' ]; then
+  elif [ $"TYPE" == 'fleet' ]; then
 	echo "master: $MSRV" > /etc/salt/minion
 	echo "id: $MINION_ID" >> /etc/salt/minion
   else
@@ -359,10 +348,10 @@ configure_minion() {
 copy_master_config() {
 
 	# Copy the master config template to the proper directory
-	if [ $INSTALLMETHOD == 'iso' ]; then
+	if [ "$INSTALLMETHOD" == 'iso' ]; then
 		cp /root/SecurityOnion/files/master /etc/salt/master
 	else
-		cp $SCRIPTDIR/../files/master /etc/salt/master
+		cp "$SCRIPTDIR"/../files/master /etc/salt/master
 	fi
 
 	# Restart the service so it picks up the changes -TODO Enable service on CentOS
@@ -372,35 +361,35 @@ copy_master_config() {
 
 copy_minion_tmp_files() {
 
-  if [ $INSTALLTYPE == 'MASTER' ] || [ $INSTALLTYPE == 'EVAL' ] || [ $INSTALLTYPE == 'HELIXSENSOR' ] || [ $INSTALLTYPE == 'MASTERSEARCH' ]; then
-	echo "Copying pillar and salt files in $TMP to /opt/so/saltstack"
-	cp -Rv $TMP/pillar/ /opt/so/saltstack/ >> "$SETUPLOG" 2>&1
-	if [ -d $TMP/salt ] ; then
-	  cp -Rv $TMP/salt/ /opt/so/saltstack/ >> "$SETUPLOG" 2>&1
+	if [ "$INSTALLTYPE" == 'MASTER' ] || [ "$INSTALLTYPE" == 'EVAL' ] || [ "$INSTALLTYPE" == 'HELIXSENSOR' ] || [ "$INSTALLTYPE" == 'MASTERSEARCH' ]; then
+		echo "Copying pillar and salt files in $TMP to /opt/so/saltstack"
+		cp -Rv "$TMP"/pillar/ /opt/so/saltstack/ >> "$SETUPLOG" 2>&1
+		if [ -d "$TMP"/salt ] ; then
+			cp -Rv "$TMP"/salt/ /opt/so/saltstack/ >> "$SETUPLOG" 2>&1
+		fi
+	else
+		{
+			echo "scp pillar and salt files in $TMP to master /opt/so/saltstack";
+			ssh -i /root/.ssh/so.key soremote@"$MSRV" mkdir -p /tmp/"$MINION_ID"/pillar;
+			ssh -i /root/.ssh/so.key soremote@"$MSRV" mkdir -p /tmp/"$MINION_ID"/schedules;
+			scp -prv -i /root/.ssh/so.key "$TMP"/pillar/minions/* soremote@"$MSRV":/tmp/"$MINION_ID"/pillar/;
+			scp -prv -i /root/.ssh/so.key "$TMP"/salt/patch/os/schedules/* soremote@"$MSRV":/tmp/"$MINION_ID"/schedules;
+			ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/salt/master/files/add_minion.sh "$MINION_ID";
+		} >> "$SETUPLOG" 2>&1
 	fi
-  else
-	echo "scp pillar and salt files in $TMP to master /opt/so/saltstack"
-	ssh -i /root/.ssh/so.key soremote@$MSRV mkdir -p /tmp/$MINION_ID/pillar >> "$SETUPLOG" 2>&1
-	ssh -i /root/.ssh/so.key soremote@$MSRV mkdir -p /tmp/$MINION_ID/schedules >> "$SETUPLOG" 2>&1
-	scp -prv -i /root/.ssh/so.key $TMP/pillar/minions/* soremote@$MSRV:/tmp/$MINION_ID/pillar/ >> "$SETUPLOG" 2>&1
-	scp -prv -i /root/.ssh/so.key $TMP/salt/patch/os/schedules/* soremote@$MSRV:/tmp/$MINION_ID/schedules >> "$SETUPLOG" 2>&1
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/salt/master/files/add_minion.sh $MINION_ID >> "$SETUPLOG" 2>&1
-	
-  fi
 
-  }
+	}
 
 copy_ssh_key() {
 
 	echo "Generating SSH key"
 	# Generate SSH key
 	mkdir -p /root/.ssh
-	cat /dev/zero | ssh-keygen -f /root/.ssh/so.key -t rsa -q -N ""
-	chown -R $SUDO_USER:$SUDO_USER /root/.ssh
+	ssh-keygen -f /root/.ssh/so.key -t rsa -q -N "" < /dev/zero
+	chown -R "$SUDO_USER":"$SUDO_USER" /root/.ssh
 	echo "Copying the SSH key to the master"
 	#Copy the key over to the master
-	ssh-copy-id -f -i /root/.ssh/so.key soremote@$MSRV
-
+	ssh-copy-id -f -i /root/.ssh/so.key soremote@"$MSRV"
 }
 
 
@@ -508,20 +497,9 @@ detect_os() {
 
 }
 
-#disable_dnsmasq() {
-
-#  if [ -f /etc/NetworkManager/NetworkManager.conf ]; then
-#    echo "Disabling dnsmasq in /etc/NetworkManager/NetworkManager.conf"
-#    sed -e 's/^dns=dnsmasq/#dns=dnsmasq/g' -i /etc/NetworkManager/NetworkManager.conf
-#  fi
-
-#}
-
 disable_onion_user() {
-
 	# Disable the default account cause security.
 	usermod -L onion
-
 }
 
 disable_misc_network_features() {
@@ -535,61 +513,49 @@ disable_misc_network_features() {
 		# Flush any existing IPs
 		ip addr flush "$UNUSED_NIC" >> "$SETUPLOG" 2>&1
 	done
-    # Disable IPv6
-    { 
-        echo "net.ipv6.conf.all.disable_ipv6 = 1"
-        echo "net.ipv6.conf.default.disable_ipv6 = 1"
-        echo "net.ipv6.conf.lo.disable_ipv6 = 1" 
-    } >> /etc/sysctl.conf
+	# Disable IPv6
+	{ 
+		echo "net.ipv6.conf.all.disable_ipv6 = 1"
+		echo "net.ipv6.conf.default.disable_ipv6 = 1"
+		echo "net.ipv6.conf.lo.disable_ipv6 = 1" 
+	} >> /etc/sysctl.conf
 }
 
 docker_install() {
 
-  if [ $OS == 'centos' ]; then
-	yum clean expire-cache
-	yum -y install yum-utils device-mapper-persistent-data lvm2 openssl
-	yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-	yum -y update
-	yum -y install docker-ce python36-docker
-	if [ $INSTALLTYPE == 'MASTER' ] || [ $INSTALLTYPE == 'EVAL' ]; then
-	  docker_registry
-	  echo "Restarting Docker" >> "$SETUPLOG" 2>&1
-	  systemctl restart docker
-	  systemctl enable docker
+	if [ $OS == 'centos' ]; then
+		yum clean expire-cache
+		yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+		yum -y update
+		yum -y install docker-ce
 	else
-	  docker_registry
-	  echo "Restarting Docker" >> "$SETUPLOG" 2>&1
-	  systemctl restart docker
-	  systemctl enable docker
+		if [ "$INSTALLTYPE" == 'MASTER' ] || [ "$INSTALLTYPE" == 'EVAL' ]; then
+			apt-get update >> "$SETUPLOG" 2>&1
+			if [ $OSVER != "xenial" ]; then
+				apt-get -y install docker-ce python3-docker >> "$SETUPLOG" 2>&1
+			else
+				apt-get -y install docker-ce python-docker >> "$SETUPLOG" 2>&1
+			fi
+		else
+			{
+				apt-key add "$TMP"/gpg/docker.pub;
+				add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable";
+				apt-get update;
+			} >> "$SETUPLOG" 2>&1
+
+			if [ $OSVER != "xenial" ]; then
+				apt-get -y install docker-ce python3-docker >> "$SETUPLOG" 2>&1
+			else
+				apt-get -y install docker-ce python-docker >> "$SETUPLOG" 2>&1
+			fi
+		fi
 	fi
-
-  else
-
-	if [ $INSTALLTYPE == 'MASTER' ] || [ $INSTALLTYPE == 'EVAL' ]; then
-	  apt-get update >> "$SETUPLOG" 2>&1
-	  if [ $OSVER != "xenial" ]; then
-		apt-get -y install docker-ce python3-docker >> "$SETUPLOG" 2>&1
-	  else
-		apt-get -y install docker-ce python-docker >> "$SETUPLOG" 2>&1
-	  fi
-	  docker_registry >> "$SETUPLOG" 2>&1
-	  echo "Restarting Docker" >> "$SETUPLOG" 2>&1
-	  systemctl restart docker >> "$SETUPLOG" 2>&1
-	else
-	  apt-key add $TMP/gpg/docker.pub >> "$SETUPLOG" 2>&1
-	  add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" >> "$SETUPLOG" 2>&1
-	  apt-get update >> "$SETUPLOG" 2>&1
-	  if [ $OSVER != "xenial" ]; then
-		apt-get -y install docker-ce python3-docker >> "$SETUPLOG" 2>&1
-	  else
-		apt-get -y install docker-ce python-docker >> "$SETUPLOG" 2>&1
-	  fi
-	  docker_registry >> "$SETUPLOG" 2>&1
-	  echo "Restarting Docker" >> "$SETUPLOG" 2>&1
-	  systemctl restart docker >> "$SETUPLOG" 2>&1
-	fi
-  fi
-
+	docker_registry
+	{
+		echo "Restarting Docker";
+		systemctl restart docker;
+		systemctl enable docker;
+	} >> "$SETUPLOG" 2>&1
 }
 
 docker_registry() {
@@ -597,97 +563,82 @@ docker_registry() {
 	echo "Setting up Docker Registry" >> "$SETUPLOG" 2>&1
 	mkdir -p /etc/docker >> "$SETUPLOG" 2>&1
 	# Make the host use the master docker registry
-	echo "{" > /etc/docker/daemon.json
-	echo "  \"registry-mirrors\": [\"https://$MSRV:5000\"]" >> /etc/docker/daemon.json
-	echo "}" >> /etc/docker/daemon.json
+	printf '%s\n'\
+		"{"\
+		"  \"registry-mirrors\": [\"https://$MSRV:5000\"]"\
+		"}" > /etc/docker/daemon.json
 	echo "Docker Registry Setup - Complete" >> "$SETUPLOG" 2>&1
 
 }
 docker_seed_registry() {
-  VERSION="HH$SOVERSION"
-  if [ $INSTALLTYPE != 'HELIXSENSOR' ]; then
-	TRUSTED_CONTAINERS=( \
-	"so-acng:$VERSION" \
-	"so-core:$VERSION" \
-	"so-thehive-cortex:$VERSION" \
-	"so-curator:$VERSION" \
-	"so-domainstats:$VERSION" \
-	"so-elastalert:$VERSION" \
-	"so-elasticsearch:$VERSION" \
-	"so-filebeat:$VERSION" \
-	"so-fleet:$VERSION" \
-	"so-fleet-launcher:$VERSION" \
-	"so-freqserver:$VERSION" \
-	"so-grafana:$VERSION" \
-	"so-idstools:$VERSION" \
-	"so-influxdb:$VERSION" \
-	"so-kibana:$VERSION" \
-	"so-logstash:$VERSION" \
-	"so-mysql:$VERSION" \
-	"so-navigator:$VERSION" \
-	"so-playbook:$VERSION" \
-	"so-redis:$VERSION" \
-	"so-soc:$VERSION" \
-	"so-kratos:$VERSION" \
-	"so-soctopus:$VERSION" \
-	"so-steno:$VERSION" \
-	#"so-strelka:$VERSION" \
-	"so-suricata:$VERSION" \
-	"so-telegraf:$VERSION" \
-	"so-thehive:$VERSION" \
-	"so-thehive-es:$VERSION" \
-	"so-wazuh:$VERSION" \
-	"so-zeek:$VERSION" )
-  else
-	TRUSTED_CONTAINERS=( \
-	"so-core:$VERSION" \
-	"so-filebeat:$VERSION" \
-	"so-idstools:$VERSION" \
-	"so-logstash:$VERSION" \
-	"so-redis:$VERSION" \
-	#"so-sensoroni:$VERSION" \
-	"so-steno:$VERSION" \
-	"so-suricata:$VERSION" \
-	"so-telegraf:$VERSION" \
-	"so-zeek:$VERSION" )
-  fi
+	VERSION="HH$SOVERSION"
+	TRUSTED_CONTAINERS=(\
+		"so-core:$VERSION" \
+		"so-filebeat:$VERSION" \
+		"so-logstash:$VERSION" \
+		"so-idstools:$VERSION" \
+		"so-redis:$VERSION" \
+		"so-steno:$VERSION" \
+		"so-suricata:$VERSION" \
+		"so-telegraf:$VERSION" \
+		"so-zeek:$VERSION"
+	)
+	if [ "$INSTALLTYPE" != 'HELIXSENSOR' ]; then
+		TRUSTED_CONTAINERS=("${TRUSTED_CONTAINERS[@]}" \
+			"so-acng:$VERSION" \
+			"so-thehive-cortex:$VERSION" \
+			"so-curator:$VERSION" \
+			"so-domainstats:$VERSION" \
+			"so-elastalert:$VERSION" \
+			"so-elasticsearch:$VERSION" \
+			"so-fleet:$VERSION" \
+			"so-fleet-launcher:$VERSION" \
+			"so-freqserver:$VERSION" \
+			"so-grafana:$VERSION" \
+			"so-influxdb:$VERSION" \
+			"so-kibana:$VERSION" \
+			"so-mysql:$VERSION" \
+			"so-navigator:$VERSION" \
+			"so-playbook:$VERSION" \
+			"so-soc:$VERSION" \
+			"so-kratos:$VERSION" \
+			"so-soctopus:$VERSION" \
+			"so-thehive:$VERSION" \
+			"so-thehive-es:$VERSION" \
+			"so-wazuh:$VERSION" \
+		)
+	fi
 
-  if [ ! -f /nsm/docker-registry/docker/so-dockers-$VERSION.tar ]; then
-	# Download the container from the interwebs
-	for i in "${TRUSTED_CONTAINERS[@]}"
-	do
-	  # Pull down the trusted docker image
-	  echo "Downloading $i"
-	  docker pull --disable-content-trust=false docker.io/soshybridhunter/$i
-	  # Tag it with the new registry destination
-	  docker tag soshybridhunter/$i $HOSTNAME:5000/soshybridhunter/$i
-	  docker push $HOSTNAME:5000/soshybridhunter/$i
-	done
+	if [ ! -f /nsm/docker-registry/docker/so-dockers-"$VERSION".tar ]; then
+		for i in "${TRUSTED_CONTAINERS[@]}"; do
+			# Pull down the trusted docker image
+			echo "Downloading $i"
+			docker pull --disable-content-trust=false docker.io/soshybridhunter/"$i"
+			# Tag it with the new registry destination
+			docker tag soshybridhunter/"$i" "$HOSTNAME":5000/soshybridhunter/"$i"
+			docker push "$HOSTNAME":5000/soshybridhunter/"$i"
+		done
 
-	for i in "${TRUSTED_CONTAINERS[@]}"
-	do
-	  echo "Removing $i locally"
-	  docker rmi soshybridhunter/$i
-	done
-  else
-	# We already have the goods son
-	rm /nsm/docker-registry/docker/so-dockers-$VERSION.tar
-  fi
+		# Prune any images that aren't used by containers
+		docker image prune -af
+	else
+		rm /nsm/docker-registry/docker/so-dockers-$VERSION.tar
+	fi
 
 }
 
 es_heapsize() {
 
 	# Determine ES Heap Size
-	if [ $TOTAL_MEM -lt 8000 ] ; then
+	if [ "$TOTAL_MEM" -lt 8000 ] ; then
 			ES_HEAP_SIZE="600m"
-	elif [ $TOTAL_MEM -ge 100000 ]; then
+	elif [ "$TOTAL_MEM" -ge 100000 ]; then
 			# Set a max of 25GB for heap size
 			# https://www.elastic.co/guide/en/elasticsearch/guide/current/heap-sizing.html
 			ES_HEAP_SIZE="25000m"
 	else
 			# Set heap size to 25% of available memory
-			ES_HEAP_SIZE=$(($TOTAL_MEM / 4))"m"
+			ES_HEAP_SIZE=$(( TOTAL_MEM / 4 ))"m"
 	fi
 
 }
@@ -698,49 +649,50 @@ filter_unused_nics() {
 
 	# If we call this function and NICs have already been assigned to the bond interface then add them to the grep search string
 	if [[ $BNICS ]]; then
-		for BONDNIC in ${BNICS[@]}; do
+		for BONDNIC in "${BNICS[@]}"; do
 			grep_string="$grep_string\|$BONDNIC"
 		done
 	fi
 
 	# Finally, set FNICS to any NICs we aren't using (and ignore interfaces that aren't of use)
-	FNICS=$(ip link | grep -vwe $grep_string | awk -F: '$0 !~ "lo|vir|veth|br|docker|wl|^[^0-9]"{print $2}')
+	FNICS=$(ip link | grep -vwe "$grep_string" | awk -F: '$0 !~ "lo|vir|veth|br|docker|wl|^[^0-9]"{print $2}')
 }
 
 fireeye_pillar() {
 
 	FIREEYEPILLARPATH=/opt/so/saltstack/pillar/fireeye
-	mkdir -p $FIREEYEPILLARPATH
+	mkdir -p "$FIREEYEPILLARPATH"
 
-	echo "" >> $FIREEYEPILLARPATH/init.sls
-	echo "fireeye:" >> $FIREEYEPILLARPATH/init.sls
-	echo "  helix:" >> $FIREEYEPILLARPATH/init.sls
-	echo "    api_key: $HELIXAPIKEY" >> $FIREEYEPILLARPATH/init.sls
+	printf '%s\n'\
+		"fireeye:"\
+		"  helix:"\
+		"    api_key: $HELIXAPIKEY" 
+		"" > "$FIREEYEPILLARPATH"/init.sls
 
 }
 
 fleet_pillar() {
 
-  PILLARFILE=$TMP/pillar/minions/$MINION_ID.sls
+	PILLARFILE="$TMP"/pillar/minions/"$MINION_ID".sls
 
-  # Create the fleet pillar
-  touch $PILLARFILE
-  echo "fleet:" >> $PILLARFILE
-  echo "  mainip: $MAINIP" >> $PILLARFILE
-  echo "  master: $MSRV" >> $PILLARFILE
-  echo "" >> $PILLARFILE
+	# Create the fleet pillar
+	printf '%s\n'\
+		"fleet:"\
+		"  mainip: $MAINIP"\
+		"  master: $MSRV"\
+		"" > "$PILLARFILE"
 }
 
 generate_passwords(){
   # Generate Random Passwords for Things
-  MYSQLPASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  FLEETPASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  FLEETJWT=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  HIVEKEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  CORTEXKEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  CORTEXORGUSERKEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  SENSORONIKEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
-  KRATOSKEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
+  MYSQLPASS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w 20 | head -n 1)
+  FLEETPASS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
+  FLEETJWT=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
+  HIVEKEY=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
+  CORTEXKEY=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
+  CORTEXORGUSERKEY=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
+  SENSORONIKEY=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
+  KRATOSKEY=$(tr -dc 'a-zA-Z0-9' < /dev/urandom  | fold -w 20 | head -n 1)
 }
 
 get_filesystem_nsm(){
@@ -753,11 +705,11 @@ get_log_size_limit() {
 	if [ -d /nsm ]; then
 		DISK_DIR="/nsm"
 	fi
-	DISK_SIZE_K=`df $DISK_DIR |grep -v "^Filesystem" | awk '{print $2}'`
+	DISK_SIZE_K=$(df $DISK_DIR |grep -v "^Filesystem" | awk '{print $2}')
 	PERCENTAGE=85
-	DISK_SIZE=DISK_SIZE_K*1000
-	PERCENTAGE_DISK_SPACE=`echo $(($DISK_SIZE*$PERCENTAGE/100))`
-	LOG_SIZE_LIMIT=$(($PERCENTAGE_DISK_SPACE/1000000000))
+	DISK_SIZE=$(( DISK_SIZE_K * 1000 ))
+	PERCENTAGE_DISK_SPACE=$(( DISK_SIZE * PERCENTAGE / 100 ))
+	LOG_SIZE_LIMIT=$(( PERCENTAGE_DISK_SPACE / 1000000000 ))
 
 }
 
@@ -781,11 +733,11 @@ get_main_ip() {
 }
 
 get_redirect() {
-  whiptail_set_redirect_info
-  whiptail_set_redirect
-  if [ "$REDIRECTINFO" == "OTHER" ]; then
-	whiptail_set_redirect_host
-  fi
+	whiptail_set_redirect_info
+	whiptail_set_redirect
+	if [ "$REDIRECTINFO" == "OTHER" ]; then
+		whiptail_set_redirect_host
+	fi
 }
 
 got_root() {
@@ -798,20 +750,18 @@ got_root() {
 
 install_cleanup() {
 
-	echo "install_cleanup removing the following files:"
-	ls -lR $TMP
+	echo "Installer removing the following files:"
+	ls -lR "$TMP"
 
 	# Clean up after ourselves
-	rm -rf /root/installtmp
+	rm -rf "$TMP"
 
 }
 
 install_prep() {
 
 	# Create a tmp space that isn't in /tmp
-	mkdir /root/installtmp
-	mkdir /root/installtmp/pillar
-	mkdir /root/installtmp/pillar/minions
+	mkdir -p /root/installtmp/pillar/minions
 	TMP=/root/installtmp
 
 }
@@ -954,32 +904,32 @@ minio_generate_keys() {
 
 	local charSet="[:graph:]"
 
-	ACCESS_KEY=$(cat /dev/urandom | tr -cd "$charSet" | tr -d \' | tr -d \" | head -c 20)
-	ACCESS_SECRET=$(cat /dev/urandom | tr -cd "$charSet" | tr -d \' | tr -d \" | head -c 40)
+	ACCESS_KEY=$(tr -cd "$charSet" < /dev/urandom | tr -d \' | tr -d \" | head -c 20)
+	ACCESS_SECRET=$(tr -cd "$charSet" < /dev/urandom | tr -d \' | tr -d \" | head -c 40)
 
 }
 
 network_setup() {
-    {
-        echo "Finishing up network setup";
+	{
+		echo "Finishing up network setup";
 
-        echo "... Verifying all network devices are managed by Network Manager";
-        check_network_manager_conf;
+		echo "... Verifying all network devices are managed by Network Manager";
+		check_network_manager_conf;
 
-        echo "... Disabling unused NICs";
-        disable_misc_network_features;
+		echo "... Disabling unused NICs";
+		disable_misc_network_features;
 
-        echo "... Setting ONBOOT for management interface";
-        if ! netplan > /dev/null 2>&1; then
-            nmcli con mod "$MAININT" connection.autoconnect "yes";
-        fi
+		echo "... Setting ONBOOT for management interface";
+		if ! netplan > /dev/null 2>&1; then
+			nmcli con mod "$MAININT" connection.autoconnect "yes";
+		fi
 
-        echo "... Copying 99-so-checksum-offload-disable";
-        cp "$SCRIPTDIR/install_scripts/99-so-checksum-offload-disable" /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable ;
+		echo "... Copying 99-so-checksum-offload-disable";
+		cp "$SCRIPTDIR/install_scripts/99-so-checksum-offload-disable" /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable ;
 
-        echo "... Modifying 99-so-checksum-offload-disable";
-        sed -i "s/\$MAININT/${MAININT}/g" /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable;
-    } >> "$SETUPLOG" 2>&1
+		echo "... Modifying 99-so-checksum-offload-disable";
+		sed -i "s/\$MAININT/${MAININT}/g" /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable;
+	} >> "$SETUPLOG" 2>&1
 }
 
 node_pillar() {
