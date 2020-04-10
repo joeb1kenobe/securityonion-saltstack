@@ -363,9 +363,8 @@ copy_master_config() {
 		cp "$SCRIPTDIR"/../files/master /etc/salt/master
 	fi
 
-	# Restart the service so it picks up the changes -TODO Enable service on CentOS
-	service salt-master restart
-
+	# Restart the service so it picks up the changes
+	systemctl restart salt-master
 }
 
 copy_minion_tmp_files() {
