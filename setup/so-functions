@@ -58,52 +58,60 @@ add_master_hostfile() {
 # $2 => uid
 # $3 => gid
 # $4 => home dir
-# $5 => create home dir
-# $6 => (optional) password variable
+# $5 => (optional) password variable
 so_add_user() {
-	echo "Add $1 user" >> "$SETUPLOG" 2>&1
-	groupadd --gid "$3" "$1"
-	
+	local username=$1
+	local uid=$2
+	local gid=$3
+	local home_dir=$4
+	if [ "$5" ]; then local pass=$5; fi
 
-	if [ "$5" = 0 ]; then
-		useradd --uid "$2" --gid "$3" --home-dir "$4" --no-create-home "$1"
-	else
-		useradd --uid "$2" --gid "$3" --home-dir "$4" "$1"
-	fi
-	
+	echo "Add $username user" >> "$SETUPLOG" 2>&1
+	groupadd --gid "$gid" "$username"
+	useradd --uid "$uid" --gid "$gid" --home-dir "$home_dir" "$username"
+
 	# If a password has been passed in, set the password
-	if [ "$6" ]; then
-		echo "$1":"$6" | chpasswd --crypt-method=SHA512
+	if [ "$pass" ]; then
+		echo "$username":"$pass" | chpasswd --crypt-method=SHA512
 	fi
 }
 
 add_socore_user_master() {
-	so_add_user "socore" "939" "939" "/opt/so" 1
+	so_add_user "socore" "939" "939" "/opt/so"
 }
 
 add_soremote_user_master() {
-	so_add_user "soremote" "947" "947" "/home/soremote" 1 "$SOREMOTEPASS1"
+	so_add_user "soremote" "947" "947" "/home/soremote" "$SOREMOTEPASS1"
 }
 
-add_socore_user_notmaster() {
-	so_add_user "soremote" "939" "939" "/opt/so" 0
+# $1 => file to wait for
+# $2 => max attempts
+# $3 => wait interval
+wait_for_file() {
+	local max_attempts=$2
+	local cur_attempts=0
+	local filename=$1
+	local wait_interval=$3
+	local total_time=$(( max_attempts * wait_interval ))
+	local date
+	date=$(date)
+
+	while [[ $cur_attempts < $max_attempts ]]; do
+		if [ -f "$filename" ]; then
+			echo "File $filename already exists at $date"
+			return
+		else
+			echo "File $filename does not exist; waiting ${wait_interval}s then checking again ($cur_attempts/$max_attempts)..."
+			((cur_attempts++))
+			sleep "$wait_interval"
+		fi
+	done
+	echo "Could not find $filename after waiting ${total_time}s"
+	return 1
 }
 
 wait_for_identity_db_to_exist() {
-  MAXATTEMPTS=30
-  attempts=0
-  while [[ $attempts -lt $MAXATTEMPTS ]]; do
-	# Check and see if the DB file is in there
-	if [ -f /opt/so/conf/kratos/db/db.sqlite ]; then
-	  echo "Database file exists at $(date)"
-	  return 0
-	else
-	  echo "Identity database does not yet exist; waiting 5 seconds and will check again ($attempts/$MAXATTEMPTS)..."
-	  sleep 5
-	  attempts=$((attempts+1))      
-	fi
-  done
-  return 1
+	return "$(wait_for_file /opt/so/conf/kratos/db/db.sqlite 30 5)"
 }
 
 add_web_user() {
@@ -123,7 +131,7 @@ secrets_pillar(){
 		"  mysql: $MYSQLPASS"\
 		"  fleet: $FLEETPASS"\
 		"  fleet_jwt: $FLEETJWT"\
-		"  fleet_enroll-secret: False" >> /opt/so/saltstack/pillar/secrets.sls
+		"  fleet_enroll-secret: False" > /opt/so/saltstack/pillar/secrets.sls
   fi
 }
 
@@ -187,15 +195,11 @@ bro_logs_enabled() {
 calculate_useable_cores() {
 
 	# Calculate reasonable core usage
-	local CORES4BRO=$(( CPUCORES/2 - 1 ))
-	LBPROCSROUND=$(printf "%.0f\n" $CORES4BRO)
-	# We don't want it to be 0
-	if [ "$LBPROCSROUND" -lt 1 ]; then
-		LBPROCS=1
-	else
-		LBPROCS=$LBPROCSROUND
-	fi
+	local cores_for_bro=$(( CPUCORES/2 - 1 ))
+	local lb_procs_round
+	lb_procs_round=$(printf "%.0f\n" $cores_for_bro)
 
+	if [ "$lb_procs_round" -lt 1 ]; then LBPROCS=1;	else LBPROCS=$lb_procs_round; fi
 }
 
 check_admin_pass() {
@@ -203,18 +207,13 @@ check_admin_pass() {
 }
 
 check_hive_init_then_reboot() {
-	WAIT_STEP=0
-	MAX_WAIT=100
 
-	until [ -f /opt/so/state/thehive.txt ] ; do
-		WAIT_STEP=$(( WAIT_STEP + 1 ))
-		echo "Waiting on the_hive to init ($WAIT_STEP/$MAX_WAIT)..."
-		if [ ${WAIT_STEP} -gt ${MAX_WAIT} ]; then
-			echo "ERROR: We waited ${MAX_WAIT} seconds but the_hive is not working."
-			return 5
-		fi
-		sleep 1s;
-	done
+	local return_val
+	return_val="$(wait_for_file /opt/so/state/thehive.txt 20 5)"
+
+	if [ "$return_val" != 0 ]; then
+		return "$return_val"
+	fi
 
 	docker stop so-thehive
 	docker rm so-thehive
@@ -249,8 +248,12 @@ check_network_manager_conf() {
 # $2 => confirm password
 # $3 => variable to set
 check_pass_match() {
-	if [ "$1" = "$2" ]; then
-		eval "$3"="\"yes\""
+	local pass=$1
+	local confirm_pass=$2
+	local var=$3
+
+	if [ "$pass" = "$confirm_pass" ]; then
+		eval "$var"="\"yes\""
 	else
 		whiptail_passwords_dont_match
 	fi
@@ -289,7 +292,7 @@ clear_master() {
 
 collect_webuser_inputs() {
 	# Get a password for the web admin user
-	VALIDUSER=no
+	local VALIDUSER=no
 	while [ $VALIDUSER != yes ]; do
 		whiptail_create_web_user
 		if so-user valemail "$WEBUSER"; then
@@ -467,10 +470,10 @@ detect_os() {
 		elif grep -q "CentOS Linux release 8" /etc/redhat-release; then
 			OSVER=8
 			echo "We currently do not support CentOS $OSVER but we are working on it!"
-			exit
+			exit 1
 		else
 			echo "We do not support the version of CentOS you are trying to use."
-			exit
+			exit 1
 		fi
 
 		# Install bind-utils so the host command exists
@@ -485,7 +488,7 @@ detect_os() {
 			OSVER=xenial
 		else
 			echo "We do not support your current version of Ubuntu."
-			exit
+			exit 1
 		fi
 		# Install network manager so we can do interface stuff
 		{
@@ -496,7 +499,7 @@ detect_os() {
 
 	else
 		echo "We were unable to determine if you are using a supported OS."
-		exit
+		exit 1
 	fi
 
 	echo "Found OS: $OS $OSVER" >> "$SETUPLOG" 2>&1
@@ -664,27 +667,27 @@ filter_unused_nics() {
 
 fireeye_pillar() {
 
-	local FIREEYEPILLARPATH=/opt/so/saltstack/pillar/fireeye
-	mkdir -p "$FIREEYEPILLARPATH"
+	local fireeye_pillar_path=/opt/so/saltstack/pillar/fireeye
+	mkdir -p "$fireeye_pillar_path"
 
 	printf '%s\n'\
 		"fireeye:"\
 		"  helix:"\
 		"    api_key: $HELIXAPIKEY" 
-		"" > "$FIREEYEPILLARPATH"/init.sls
+		"" > "$fireeye_pillar_path"/init.sls
 
 }
 
 fleet_pillar() {
 
-	local PILLARFILE="$TMP"/pillar/minions/"$MINION_ID".sls
+	local pillar_file="$TMP"/pillar/minions/"$MINION_ID".sls
 
 	# Create the fleet pillar
 	printf '%s\n'\
 		"fleet:"\
 		"  mainip: $MAINIP"\
 		"  master: $MSRV"\
-		"" > "$PILLARFILE"
+		"" > "$pillar_file"
 }
 
 generate_passwords(){
@@ -725,6 +728,8 @@ get_main_ip() {
 
 	# Get the main IP address the box is using
 
+	# FIXME: find a way to get the ip of MNIC instead
+
 	# Add some logic because Bubntu 18.04 like to be different
 	if [ $OSVER = 'bionic' ]; then
 		MAINIP=$(ip route get 1 | awk '{print $7;exit}')
@@ -732,6 +737,7 @@ get_main_ip() {
 		MAINIP=$(ip route get 1 | awk '{print $NF;exit}')
 	fi
 
+	# FIXME: should MAININT be MNIC?
 	MAININT=$(ip route get 1 | awk '{print $5;exit}')
 
 }
@@ -790,21 +796,27 @@ install_master() {
 
 ls_heapsize() {
 
-  # Determine LS Heap Size
-  if [ "$TOTAL_MEM" -ge 32000 ] || [ "$INSTALLTYPE" = 'MASTERSEARCH' ] || [ "$INSTALLTYPE" = 'HEAVYNODE' ] ||  [ "$INSTALLTYPE" = 'HELIXSENSOR' ]; then
-	  LS_HEAP_SIZE="1000m"
-  elif [ "$INSTALLTYPE" = 'EVAL' ]; then
-	  LS_HEAP_SIZE="700m"
-  else
-	  # If minimal RAM, then set minimal heap
-	  LS_HEAP_SIZE="500m"
-  fi
+	if [ "$TOTAL_MEM" -ge 32000 ]; then
+		LS_HEAP_SIZE='1000m'
+		return
+	fi
 
+	case "$INSTALLTYPE" in
+		'MASTERSEARCH' | 'HEAVYNODE' | 'HELIXSENSOR')
+			LS_HEAP_SIZE='1000m'
+			;;
+		'EVAL')
+			LS_HEAP_SIZE='700m'
+			;;
+		*)
+			LS_HEAP_SIZE='500m'
+			;;
+	esac
 }
 
 master_pillar() {
 
-	PILLARFILE=$TMP/pillar/minions/$MINION_ID.sls
+	local pillar_file=$TMP/pillar/minions/$MINION_ID.sls
 
 	# Create the master pillar
 	printf '%s\n'\
@@ -813,50 +825,50 @@ master_pillar() {
 		"  esheap: $ES_HEAP_SIZE"\
 		"  esclustername: {{ grains.host }}"\
 		"  freq: 0"\
-		"  domainstats: 0" >> "$PILLARFILE"
+		"  domainstats: 0" >> "$pillar_file"
 
 	if [ "$INSTALLTYPE" = 'EVAL' ] || [ "$INSTALLTYPE" = 'HELIXSENSOR' ] || [ "$INSTALLTYPE" = 'MASTERSEARCH' ]; then
 		printf '%s\n'\
 			"  ls_pipeline_batch_size: 125"\
 			"  ls_input_threads: 1"\
 			"  ls_batch_count: 125"\
-			"  mtu: $MTU" >> "$PILLARFILE"
+			"  mtu: $MTU" >> "$pillar_file"
 	fi
 	printf '%s\n'\
-	"  lsheap: $LS_HEAP_SIZE"\
-	"  lsaccessip: 127.0.0.1"\
-	"  elastalert: 1"\
-	"  ls_pipeline_workers: $CPUCORES"\
-	"  nids_rules: $RULESETUP"\
-	"  oinkcode: $OINKCODE"\
-	"  es_port: $NODE_ES_PORT"\
-	"  log_size_limit: $LOG_SIZE_LIMIT"\
-	"  cur_close_days: $CURCLOSEDAYS"\
-	"  grafana: $GRAFANA"\
-	"  osquery: $OSQUERY"\
-	"  wazuh: $WAZUH"\
-	"  thehive: $THEHIVE"\
-	"  playbook: $PLAYBOOK"\
-	"  strelka: $STRELKA"\
-	""\
-	"kratos:" >> "$PILLARFILE"
+		"  lsheap: $LS_HEAP_SIZE"\
+		"  lsaccessip: 127.0.0.1"\
+		"  elastalert: 1"\
+		"  ls_pipeline_workers: $CPUCORES"\
+		"  nids_rules: $RULESETUP"\
+		"  oinkcode: $OINKCODE"\
+		"  es_port: $NODE_ES_PORT"\
+		"  log_size_limit: $LOG_SIZE_LIMIT"\
+		"  cur_close_days: $CURCLOSEDAYS"\
+		"  grafana: $GRAFANA"\
+		"  osquery: $OSQUERY"\
+		"  wazuh: $WAZUH"\
+		"  thehive: $THEHIVE"\
+		"  playbook: $PLAYBOOK"\
+		"  strelka: $STRELKA"\
+		""\
+		"kratos:" >> "$pillar_file"
 
 	case $REDIRECTINFO in
 		'IP')
-		REDIRECTIT="$MAINIP"
-		;;
+			REDIRECTIT="$MAINIP"
+			;;
 		'HOSTNAME')
-		REDIRECTIT=$HOSTNAME
-		;;
+			REDIRECTIT=$HOSTNAME
+			;;
 		*)
-		REDIRECTIT="$REDIRECT"
-		;;
+			REDIRECTIT="$REDIRECT"
+			;;
 	esac
 
 	printf '%s\n'\
 		"  kratoskey: $KRATOSKEY"\
 		"  redirect: $REDIRECTIT"\
-		"" >> "$PILLARFILE"
+		"" >> "$pillar_file"
 
 
   }
@@ -928,7 +940,7 @@ network_setup() {
 
 node_pillar() {
 
-	local PILLARFILE=$TMP/pillar/minions/$MINION_ID.sls
+	local pillar_file=$TMP/pillar/minions/$MINION_ID.sls
 
 	# Create the node pillar
 	printf '%s\n'\
@@ -947,13 +959,13 @@ node_pillar() {
 		"  es_port: $NODE_ES_PORT"\
 		"  log_size_limit: $LOG_SIZE_LIMIT"\
 		"  cur_close_days: $CURCLOSEDAYS"\
-		"" >> "$PILLARFILE"
+		"" >> "$pillar_file"
 
 }
 
 patch_pillar() {
 
-	local PILLARFILE=$TMP/pillar/minions/$MINION_ID.sls
+	local pillar_file=$TMP/pillar/minions/$MINION_ID.sls
 
 	printf '%s\n'\
 		""\
@@ -962,7 +974,7 @@ patch_pillar() {
 		"    schedule_name: $PATCHSCHEDULENAME"\
 		"    enabled: True"\
 		"    splay: 300"\
-		"" >> "$PILLARFILE"
+		"" >> "$pillar_file"
 
 }
 
@@ -1005,451 +1017,371 @@ reserve_group_ids() {
 
 saltify() {
 
-  # Install updates and Salt
-  if [ $OS = 'centos' ]; then
-	if [ $INSTALLTYPE = 'MASTER' ] || [ $INSTALLTYPE = 'EVAL' ] || [ $INSTALLTYPE = 'HELIXSENSOR' ] || [ $INSTALLTYPE = 'MASTERSEARCH' ]; then
-	  reserve_group_ids
-	  yum -y install epel-release
-	  yum -y install wget https://repo.saltstack.com/py3/redhat/salt-py3-repo-latest-2.el7.noarch.rpm
-	  cp /etc/yum.repos.d/salt-py3-latest.repo /etc/yum.repos.d/salt-py3-2019-2.repo
-	  sed -i 's/latest/2019.2/g' /etc/yum.repos.d/salt-py3-2019-2.repo
-	  yum -y install sqlite3 argon2 curl jq openssl
-	  # Download Ubuntu Keys in case master updates = 1
-	  mkdir -p /opt/so/gpg
-	  wget --inet4-only -O /opt/so/gpg/SALTSTACK-GPG-KEY.pub https://repo.saltstack.com/apt/ubuntu/16.04/amd64/latest/SALTSTACK-GPG-KEY.pub
-	  wget --inet4-only -O /opt/so/gpg/docker.pub https://download.docker.com/linux/ubuntu/gpg
-	  wget --inet4-only -O /opt/so/gpg/GPG-KEY-WAZUH https://packages.wazuh.com/key/GPG-KEY-WAZUH
-	  cat > /etc/yum.repos.d/wazuh.repo <<\EOF
-[wazuh_repo]
-gpgcheck=1
-gpgkey=https://packages.wazuh.com/key/GPG-KEY-WAZUH
-enabled=1
-name=Wazuh repository
-baseurl=https://packages.wazuh.com/3.x/yum/
-protect=1
-EOF
+	# Install updates and Salt
+	if [ $OS = 'centos' ]; then
+		case "$INSTALLTYPE" in
+			'MASTER' | 'EVAL' | 'MASTERSEARCH' | 'FLEET') # FIXME: should this be separate?
+				yum instal -y mariadb-devel
+				;;
+			'HELIXSENSOR')
+				reserve_group_ids
+				yum -y install epel-release
+				yum -y install wget https://repo.saltstack.com/py3/redhat/salt-py3-repo-latest-2.el7.noarch.rpm
+				cp /etc/yum.repos.d/salt-py3-latest.repo /etc/yum.repos.d/salt-py3-2019-2.repo
+				sed -i 's/latest/2019.2/g' /etc/yum.repos.d/salt-py3-2019-2.repo
+				yum -y install sqlite3 argon2 curl jq openssl
+				# Download Ubuntu Keys in case master updates = 1
+				mkdir -p /opt/so/gpg
+				wget --inet4-only -O /opt/so/gpg/SALTSTACK-GPG-KEY.pub https://repo.saltstack.com/apt/ubuntu/16.04/amd64/latest/SALTSTACK-GPG-KEY.pub
+				wget --inet4-only -O /opt/so/gpg/docker.pub https://download.docker.com/linux/ubuntu/gpg
+				wget --inet4-only -O /opt/so/gpg/GPG-KEY-WAZUH https://packages.wazuh.com/key/GPG-KEY-WAZUH
+				cp "$SCRIPTDIR/yum_repos/wazuh.repo" /etc/yum.repos.d/wazuh.repo
+				yum -y install salt-master-2019.2.3
+				systemctl enable salt-master
+				;;
+			*)
+				if [ "$MASTERUPDATES" -eq 1 ]; then
+					# Create the GPG Public Key for the Salt Repo
+					cp "$SCRIPTDIR"/public_keys/salt.pem /etc/pki/rpm-gpg/saltstack-signing-key
+									
+					# Add the Wazuh Key
+					cp "$SCRIPTDIR"/public_keys/wazuh.pem /etc/pki/rpm-gpg/GPG-KEY-WAZUH
 
-		else
-
-			if [ "$MASTERUPDATES" = 1 ]; then
-
-				# Create the GPG Public Key for the Salt Repo
-				cp "$SCRIPTDIR"/public_keys/salt.pem /etc/pki/rpm-gpg/saltstack-signing-key
-				
-				# Add the Wazuh Key
-				cp "$SCRIPTDIR"/public_keys/wazuh.pem /etc/pki/rpm-gpg/GPG-KEY-WAZUH
-
-				# Proxy is hating on me.. Lets just set it manually
-				echo "[salt-latest]" > /etc/yum.repos.d/salt-latest.repo
-				echo "name=SaltStack Latest Release Channel for RHEL/Centos \$releasever" >> /etc/yum.repos.d/salt-latest.repo
-				echo "baseurl=https://repo.saltstack.com/py3/redhat/7/\$basearch/latest" >> /etc/yum.repos.d/salt-latest.repo
-				echo "failovermethod=priority" >> /etc/yum.repos.d/salt-latest.repo
-				echo "enabled=1" >> /etc/yum.repos.d/salt-latest.repo
-				echo "gpgcheck=1" >> /etc/yum.repos.d/salt-latest.repo
-				echo "gpgkey=file:///etc/pki/rpm-gpg/saltstack-signing-key" >> /etc/yum.repos.d/salt-latest.repo
-
-				# Proxy is hating on me.. Lets just set it manually
-				echo "[salt-2019.2]" > /etc/yum.repos.d/salt-2019-2.repo
-				echo "name=SaltStack Latest Release Channel for RHEL/Centos \$releasever" >> /etc/yum.repos.d/salt-2019-2.repo
-				echo "baseurl=https://repo.saltstack.com/py3/redhat/7/\$basearch/2019.2" >> /etc/yum.repos.d/salt-2019-2.repo
-				echo "failovermethod=priority" >> /etc/yum.repos.d/salt-2019-2.repo
-				echo "enabled=1" >> /etc/yum.repos.d/salt-2019-2.repo
-				echo "gpgcheck=1" >> /etc/yum.repos.d/salt-2019-2.repo
-				echo "gpgkey=file:///etc/pki/rpm-gpg/saltstack-signing-key" >> /etc/yum.repos.d/salt-2019-2.repo
-
-				cat > /etc/yum.repos.d/wazuh.repo <<\EOF
-[wazuh_repo]
-gpgcheck=1
-gpgkey=file:///etc/pki/rpm-gpg/GPG-KEY-WAZUH
-enabled=1
-name=Wazuh repository
-baseurl=https://packages.wazuh.com/3.x/yum/
-protect=1
-EOF
-			else
-				yum -y install https://repo.saltstack.com/py3/redhat/salt-py3-repo-latest-2.el7.noarch.rpm
-				cp /etc/yum.repos.d/salt-py3-latest.repo /etc/yum.repos.d/salt-2019-2.repo
-				sed -i 's/latest/2019.2/g' /etc/yum.repos.d/salt-2019-2.repo
-cat > /etc/yum.repos.d/wazuh.repo <<\EOF
-[wazuh_repo]
-gpgcheck=1
-gpgkey=file:///etc/pki/rpm-gpg/GPG-KEY-WAZUH
-enabled=1
-name=Wazuh repository
-baseurl=https://packages.wazuh.com/3.x/yum/
-protect=1
-EOF
-	  fi
-	fi
-
-	yum clean expire-cache
-	yum -y install epel-release salt-minion-2019.2.3 yum-utils device-mapper-persistent-data lvm2 openssl jq
-	yum -y update exclude=salt*
-	systemctl enable salt-minion
-
-	if [ "$INSTALLTYPE" = 'MASTER' ] || [ "$INSTALLTYPE" = 'EVAL' ] || [ "$INSTALLTYPE" = 'HELIXSENSOR' ] || [ "$INSTALLTYPE" = 'MASTERSEARCH' ]; then
-	  yum -y install salt-master-2019.2.3 python3 python36-m2crypto salt-minion-2019.2.3 python36-dateutil python36-mysql python36-docker
-	  systemctl enable salt-master
-	elif [ "$INSTALLTYPE" = 'FLEET' ]; then 
-	  yum -y install salt-minion-2019.2.3 python3 python36-m2crypto python36-dateutil python36-docker python36-mysql 
+					# Copy repo files over
+					cp "$SCRIPTDIR"/yum_repos/salt-latest.repo /etc/yum.repos.d/salt-latest.repo
+					cp "$SCRIPTDIR"/yum_repos/salt-2019-2.repo /etc/yum.repos.d/salt-2019-2.repo
+				else
+					yum -y install https://repo.saltstack.com/py3/redhat/salt-py3-repo-latest-2.el7.noarch.rpm
+					cp /etc/yum.repos.d/salt-py3-latest.repo /etc/yum.repos.d/salt-2019-2.repo
+					sed -i 's/latest/2019.2/g' /etc/yum.repos.d/salt-2019-2.repo
+				fi
+				;;
+		esac
+		cp "$SCRIPTDIR/yum_repos/wazuh.repo" /etc/yum.repos.d/wazuh.repo
+		yum clean expire-cache
+		yum -y install epel-release\
+			salt-minion-2019.2.3\
+			python3\
+			python36-docker\
+			python36-dateutil\
+			python36-m2crypto\
+			python36-mysql\
+			yum-utils\
+			device-mapper-persistent-data\
+			lvm2\
+			openssl\
+			jq
+		yum -y update exclude=salt*
+		systemctl enable salt-minion
+		echo "exclude=salt*" >> /etc/yum.conf
 	else
-	  yum -y install salt-minion-2019.2.3 python3 python36-m2crypto python36-dateutil python36-docker
+		DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
+
+		if [ $OSVER != "xenial" ]; then
+			# Switch to Python 3 as default if this is not xenial
+			update-alternatives --install /usr/bin/python python /usr/bin/python3.6 10
+		fi
+		# Add the pre-requisites for installing docker-ce
+		apt-get -y install ca-certificates\
+			curl\
+			software-properties-common\
+			apt-transport-https\
+			openssl\
+			jq >> "$SETUPLOG" 2>&1
+
+		# Grab the version from the os-release file
+		local ubuntu_version
+		ubuntu_version=$(grep VERSION_ID /etc/os-release | awk -F '[ "]' '{print $2}')
+
+		case "$INSTALLTYPE" in
+			'FLEET')
+				if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-mysqldb >> "$SETUPLOG" 2>&1; else apt-get -y install python-mysqldb >> "$SETUPLOG" 2>&1; fi
+				;;
+			'MASTER' | 'EVAL' | 'MASTERSEARCH') # TODO: should this also be HELIXSENSOR?
+				if [ "$OSVER" != "xenial" ]; then local py_ver_url_path="/py3"; else local py_ver_url_path="/apt"; fi
+
+				# Add saltstack repo(s)
+				wget --inet4-only -O - https://repo.saltstack.com"$py_ver_url_path"/ubuntu/"$ubuntu_version"/amd64/3000/SALTSTACK-GPG-KEY.pub | apt-key add -
+				wget --inet4-only -O - https://repo.saltstack.com"$py_ver_url_path"/ubuntu/"$ubuntu_version"/amd64/2019.2/SALTSTACK-GPG-KEY.pub | apt-key add -
+				echo "deb http://repo.saltstack.com/py3/ubuntu/$ubuntu_version/amd64/latest $OSVER main" > /etc/apt/sources.list.d/saltstack.list
+				echo "deb http://repo.saltstack.com/py3/ubuntu/$ubuntu_version/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack2019.list
+
+				# Add Docker repo
+				curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+				add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+				# Get gpg keys
+				mkdir -p /opt/so/gpg
+				wget --inet4-only -O /opt/so/gpg/SALTSTACK-GPG-KEY.pub https://repo.saltstack.com/apt/ubuntu/"$ubuntu_version"/amd64/latest/SALTSTACK-GPG-KEY.pub
+				wget --inet4-only -O /opt/so/gpg/docker.pub https://download.docker.com/linux/ubuntu/gpg
+				wget --inet4-only -O /opt/so/gpg/GPG-KEY-WAZUH https://packages.wazuh.com/key/GPG-KEY-WAZUH
+
+				# Get key and install wazuh
+				curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | apt-key add -
+				# Add repo
+				echo "deb https://packages.wazuh.com/3.x/apt/ stable main" | tee /etc/apt/sources.list.d/wazuh.list
+				# Initialize the new repos
+				apt-get update >> "$SETUPLOG" 2>&1
+				# FIXME: Install salt-master on Ubuntu?
+				apt-get -y install sqlite3 argon2 openssl >> "$SETUPLOG" 2>&1
+				if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-mysqldb >> "$SETUPLOG" 2>&1; else apt-get -y install python-mysqldb >> "$SETUPLOG" 2>&1; fi
+				;;
+			*)
+				# Copy down the gpg keys and install them from the master
+				mkdir "$TMP"/gpg
+				echo "scp the gpg keys and install them from the master"
+				scp -v -i /root/.ssh/so.key soremote@"$MSRV":/opt/so/gpg/* "$TMP"/gpg
+				echo "Using apt-key add to add SALTSTACK-GPG-KEY.pub and GPG-KEY-WAZUH"
+				apt-key add "$TMP"/gpg/SALTSTACK-GPG-KEY.pub
+				apt-key add "$TMP"/gpg/GPG-KEY-WAZUH
+				echo "deb http://repo.saltstack.com/apt/ubuntu/$ubuntu_version/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack.list
+				echo "deb https://packages.wazuh.com/3.x/apt/ stable main" | tee /etc/apt/sources.list.d/wazuh.list
+				;;
+		esac
+		apt-get update >> "$SETUPLOG" 2>&1
+		apt-get -y install salt-minion=2019.2.3+ds-1\
+					salt-common=2019.2.3+ds-1 >> "$SETUPLOG" 2>&1
+		apt-mark hold salt-minion salt-common
+		if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-dateutil python3-m2crypto >> "$SETUPLOG" 2>&1; else apt-get -y install python-dateutil python-m2crypto >> "$SETUPLOG" 2>&1; fi
 	fi
-	echo "exclude=salt*" >> /etc/yum.conf
-
-  # Our OS is not CentOS
-  else
-	DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade
-
-	if [ $OSVER != "xenial" ]; then
-
-	  # Switch to Python 3 as default is this is not xenial
-	  update-alternatives --install /usr/bin/python python /usr/bin/python3.6 10
-
-	fi
-	# Add the pre-requisites for installing docker-ce
-	apt-get -y install ca-certificates curl software-properties-common apt-transport-https openssl jq >> "$SETUPLOG" 2>&1
-
-	# Grab the version from the os-release file
-	UVER=$(grep VERSION_ID /etc/os-release | awk -F '[ "]' '{print $2}')
-
-	# Nasty hack but required for now
-	if [ $INSTALLTYPE = 'MASTER' ] || [ $INSTALLTYPE = 'EVAL' ] || [ $INSTALLTYPE = 'MASTERSEARCH' ]; then
-
-	  if [ $OSVER != "xenial" ]; then
-		# Install the repo for salt py3 edition
-		wget --inet4-only -O - https://repo.saltstack.com/py3/ubuntu/$UVER/amd64/3000/SALTSTACK-GPG-KEY.pub | apt-key add -
-		wget --inet4-only -O - https://repo.saltstack.com/py3/ubuntu/$UVER/amd64/2019.2/SALTSTACK-GPG-KEY.pub | apt-key add -
-		echo "deb http://repo.saltstack.com/py3/ubuntu/$UVER/amd64/latest $OSVER main" > /etc/apt/sources.list.d/saltstack.list
-		echo "deb http://repo.saltstack.com/py3/ubuntu/$UVER/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack2019.list
-	  else
-		# Install the repo for salt
-		wget --inet4-only -O - https://repo.saltstack.com/apt/ubuntu/$UVER/amd64/latest/SALTSTACK-GPG-KEY.pub | apt-key add -
-		wget --inet4-only -O - https://repo.saltstack.com/apt/ubuntu/$UVER/amd64/2019.2/SALTSTACK-GPG-KEY.pub | apt-key add -
-		echo "deb http://repo.saltstack.com/apt/ubuntu/$UVER/amd64/latest $OSVER main" > /etc/apt/sources.list.d/saltstack.list
-		echo "deb http://repo.saltstack.com/apt/ubuntu/$UVER/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack2019.list
-	  fi
-	  # Lets get the docker repo added
-	  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-	  add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-
-	  # Create a place for the keys
-	  mkdir -p /opt/so/gpg
-	  wget --inet4-only -O /opt/so/gpg/SALTSTACK-GPG-KEY.pub https://repo.saltstack.com/apt/ubuntu/$UVER/amd64/latest/SALTSTACK-GPG-KEY.pub
-	  wget --inet4-only -O /opt/so/gpg/docker.pub https://download.docker.com/linux/ubuntu/gpg
-	  wget --inet4-only -O /opt/so/gpg/GPG-KEY-WAZUH https://packages.wazuh.com/key/GPG-KEY-WAZUH
-
-	  # Get key and install wazuh
-	  curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | apt-key add -
-	  # Add repo
-	  echo "deb https://packages.wazuh.com/3.x/apt/ stable main" | tee /etc/apt/sources.list.d/wazuh.list
-
-	  # Initialize the new repos
-	  apt-get update >> "$SETUPLOG" 2>&1
-	  if [ $OSVER != "xenial" ]; then
-		apt-get -y install salt-minion=2019.2.3+ds-1 salt-common=2019.2.3+ds-1 python3-dateutil python3-m2crypto sqlite3 argon2 curl jq openssl >> "$SETUPLOG" 2>&1
-		apt-mark hold salt-minion salt-common
-	  else
-		# Need to add python packages here
-		apt-get -y install salt-minion=2019.2.3+ds-1 salt-common=2019.2.3+ds-1 python-dateutil python-m2crypto sqlite3 argon2 curl jq openssl >> "$SETUPLOG" 2>&1
-		apt-mark hold salt-minion salt-common
-	  fi
-	else
-
-	  # Copy down the gpg keys and install them from the master
-	  mkdir $TMP/gpg
-	  echo "scp the gpg keys and install them from the master"
-	  scp -v -i /root/.ssh/so.key soremote@$MSRV:/opt/so/gpg/* $TMP/gpg
-	  echo "Using apt-key add to add SALTSTACK-GPG-KEY.pub and GPG-KEY-WAZUH"
-	  apt-key add $TMP/gpg/SALTSTACK-GPG-KEY.pub
-	  apt-key add $TMP/gpg/GPG-KEY-WAZUH
-	  echo "deb http://repo.saltstack.com/apt/ubuntu/$UVER/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack.list
-	  echo "deb https://packages.wazuh.com/3.x/apt/ stable main" | tee /etc/apt/sources.list.d/wazuh.list
-	  # Initialize the new repos
-	  apt-get update >> "$SETUPLOG" 2>&1
-	  if [ $OSVER != "xenial" ]; then
-		apt-get -y install salt-minion=2019.2.3+ds-1 salt-common=2019.2.3+ds-1 python3-dateutil python3-m2crypto >> "$SETUPLOG" 2>&1
-		apt-mark hold salt-minion salt-common
-	  else
-		# Need to add python packages here
-		apt-get -y install salt-minion=2019.2.3+ds-1 salt-common=2019.2.3+ds-1 python-dateutil python-m2crypto >> "$SETUPLOG" 2>&1
-		apt-mark hold salt-minion salt-common
-	  fi
-	fi
-
-  fi
 
 }
 
 salt_checkin() {
-  # Master State to Fix Mine Usage
-  if [ $INSTALLTYPE = 'MASTER' ] || [ $INSTALLTYPE = 'EVAL' ] || [ $INSTALLTYPE = 'HELIXSENSOR' ] || [ $INSTALLTYPE = 'MASTERSEARCH' ]; then
-  echo "Building Certificate Authority"
-  salt-call state.apply ca >> "$SETUPLOG" 2>&1
-  echo " *** Restarting Salt to fix any SSL errors. ***"
-  service salt-master restart >> "$SETUPLOG" 2>&1
-  sleep 5
-  service salt-minion restart >> "$SETUPLOG" 2>&1
-  sleep 15
-  echo " Applyng a mine hack "
-  salt '*' mine.send x509.get_pem_entries glob_path=/etc/pki/ca.crt >> "$SETUPLOG" 2>&1
-  echo " Applying SSL state "
-  salt-call state.apply ssl >> "$SETUPLOG" 2>&1
-  echo "Still Working... Hang in there"
-  #salt-call state.highstate
 
-  else
-
-  # Run Checkin
-  salt-call state.apply ca >> "$SETUPLOG" 2>&1
-  salt-call state.apply ssl >> "$SETUPLOG" 2>&1
-  #salt-call state.highstate >> "$SETUPLOG" 2>&1
-
-  fi
-
+	case "$INSTALLTYPE" in
+		'MASTER' | 'EVAL' | 'HELIXSENSOR' | 'MASTERSEARCH') # Fix Mine usage
+			{
+				echo "Building Certificate Authority";
+				salt-call state.apply ca;
+				echo " *** Restarting Salt to fix any SSL errors. ***";
+				service salt-master restart;
+				sleep 5;
+				service salt-minion restart;
+				sleep 15;
+				echo " Applyng a mine hack";
+				salt '*' mine.send x509.get_pem_entries glob_path=/etc/pki/ca.crt;
+				echo " Applying SSL state";
+				salt-call state.apply ssl;
+			} >> "$SETUPLOG" 2>&1
+			;;
+		*)
+			salt-call state.apply ca >> "$SETUPLOG" 2>&1
+			salt-call state.apply ssl >> "$SETUPLOG" 2>&1
+			;;
+	esac
 }
 
+# FIXME: should this be a function?
 salt_firstcheckin() {
-
 	#First Checkin
 	salt-call state.highstate >> "$SETUPLOG" 2>&1
 
 }
 
 salt_master_directories() {
-
 	# Create salt paster directories
 	mkdir -p /opt/so/saltstack/salt
 	mkdir -p /opt/so/saltstack/pillar
 
 	# Copy over the salt code and templates
-	if [ $INSTALLMETHOD = 'iso' ]; then
+	if [ "$INSTALLMETHOD" = 'iso' ]; then
 		rsync -avh --exclude 'TRANS.TBL' /home/onion/SecurityOnion/pillar/* /opt/so/saltstack/pillar/
 		rsync -avh --exclude 'TRANS.TBL' /home/onion/SecurityOnion/salt/* /opt/so/saltstack/salt/
 	else
-		cp -R $SCRIPTDIR/../pillar/* /opt/so/saltstack/pillar/
-		cp -R $SCRIPTDIR/../salt/* /opt/so/saltstack/salt/
+		cp -R "$SCRIPTDIR"/../pillar/* /opt/so/saltstack/pillar/
+		cp -R "$SCRIPTDIR"/../salt/* /opt/so/saltstack/salt/
 	fi
 
+	# FIXME: why is this being done?
 	chmod +x /opt/so/saltstack/pillar/firewall/addfirewall.sh
 	chmod +x /opt/so/saltstack/pillar/data/addtotab.sh
 
 }
 
-salt_install_mysql_deps() {
+sensor_pillar() {
 
-	if [ $OS = 'centos' ]; then
-		yum -y install mariadb-devel
-	elif [ $OS = 'ubuntu' ]; then
-		if [ $OSVER != "xenial" ]; then
-			apt-get -y install python3-mysqldb >> "$SETUPLOG" 2>&1
-		else
-			apt-get -y install python-mysqldb
+	local pillar_file=$TMP/pillar/minions/$MINION_ID.sls
+
+	# Create the sensor pillar
+	printf '%s\n'\
+		"sensor"\
+		"  interface: bond0"\
+		"  mainip: $MAINIP"\
+		"  mainint: $MAININT" > "$pillar_file"
+	
+	if [ "$NSMSETUP" = 'ADVANCED' ]; then
+		echo "  bro_pins:" >> "$pillar_file"
+		for PIN in $BROPINS; do
+			PIN=$(echo "$PIN" |  cut -d\" -f2)
+		echo "    - $PIN" >> "$pillar_file"
+		done
+		echo "  suripins:" >> "$pillar_file"
+		for SPIN in $SURIPINS; do
+			SPIN=$(echo "$SPIN" |  cut -d\" -f2)
+		echo "    - $SPIN" >> "$pillar_file"
+		done
+	elif [ "$INSTALLTYPE" = 'HELIXSENSOR' ]; then
+		echo "  bro_lbprocs: $LBPROCS" >> "$pillar_file"
+		echo "  suriprocs: $LBPROCS" >> "$pillar_file"
+	else
+		echo "  bro_lbprocs: $BASICBRO" >> "$pillar_file"
+		echo "  suriprocs: $BASICSURI" >> "$pillar_file"
+	fi
+	printf '%s\n'\
+		"  brobpf:"\
+		"  pcapbpf:"\
+		"  nidsbpf:"\
+		"  master: $MSRV"\
+		"  mtu: $MTU"\
+		"  uniqueid: $(date '+%s')" >> "$pillar_file"
+	if [ "$HNSENSOR" != 'inherit' ]; then
+		echo "  hnsensor: $HNSENSOR" >> "$pillar_file"
+	fi
+	printf '%s\n'\
+		"  access_key: $ACCESS_KEY"\
+		"  access_secret: $ACCESS_SECRET"\
+		"" >> "$pillar_file"
+}
+
+set_hostname() {
+
+	set_hostname_iso
+
+	HOSTNAME=$(cat /etc/hostname)
+	if [[ ! $INSTALLTYPE =~ ^(MASTER|EVAL|HELIXSENSOR|MASTERSEARCH)$ ]]; then
+		if [[ $TESTHOST = *"not found"* ]] || [ -z "$TESTHOST" ] || [[ $TESTHOST = *"connection timed out"* ]]; then
+			if ! grep -q "$MSRVIP" /etc/hosts; then
+				echo "$MSRVIP   $MSRV" >> /etc/hosts
+			fi
 		fi
 	fi
 
 }
 
-sensor_pillar() {
-
-	PILLARFILE=$TMP/pillar/minions/$MINION_ID.sls
-
-	# Create the sensor pillar
-	touch $PILLARFILE
-	echo "sensor:" >> $PILLARFILE
-	echo "  interface: bond0" >> $PILLARFILE
-	echo "  mainip: $MAINIP" >> $PILLARFILE
-	echo "  mainint: $MAININT" >> $PILLARFILE
-	if [ $NSMSETUP = 'ADVANCED' ]; then
-		echo "  bro_pins:" >> $PILLARFILE
-		for PIN in $BROPINS; do
-			PIN=$(echo $PIN |  cut -d\" -f2)
-		echo "    - $PIN" >> $PILLARFILE
-		done
-		echo "  suripins:" >> $PILLARFILE
-		for SPIN in $SURIPINS; do
-			SPIN=$(echo $SPIN |  cut -d\" -f2)
-		echo "    - $SPIN" >> $PILLARFILE
-		done
-	elif [ $INSTALLTYPE = 'HELIXSENSOR' ]; then
-		echo "  bro_lbprocs: $LBPROCS" >> $PILLARFILE
-		echo "  suriprocs: $LBPROCS" >> $PILLARFILE
-	else
-		echo "  bro_lbprocs: $BASICBRO" >> $PILLARFILE
-		echo "  suriprocs: $BASICSURI" >> $PILLARFILE
-	fi
-	echo "  brobpf:" >> $PILLARFILE
-	echo "  pcapbpf:" >> $PILLARFILE
-	echo "  nidsbpf:" >> $PILLARFILE
-	echo "  master: $MSRV" >> $PILLARFILE
-	echo "  mtu: $MTU" >> $PILLARFILE
-	echo "  uniqueid: $(date '+%s')" >> $PILLARFILE
-	if [ $HNSENSOR != 'inherit' ]; then
-	echo "  hnsensor: $HNSENSOR" >> $PILLARFILE
-	fi
-	echo "  access_key: $ACCESS_KEY" >> $PILLARFILE
-	echo "  access_secret: $ACCESS_SECRET" >>  $PILLARFILE
-	echo "" >> $PILLARFILE
-
-}
-
-set_environment_var() {
-
-	echo "Setting environment variable: $1"
-
-	export "$1"
-	echo "$1" >> /etc/environment
-
-}
-
-set_hostname() {
-
-  echo 'set_hostname called' >> "$SETUPLOG" 2>&1
-  echo $TESTHOST >> "$SETUPLOG" 2>&1
-  echo $INSTALLTYPE >> "$SETUPLOG" 2>&1
-  hostnamectl set-hostname --static $HOSTNAME
-  echo "127.0.0.1   $HOSTNAME $HOSTNAME.localdomain localhost localhost.localdomain localhost4 localhost4.localdomain" > /etc/hosts
-  echo "::1   localhost localhost.localdomain localhost6 localhost6.localdomain6" >> /etc/hosts
-  echo $HOSTNAME > /etc/hostname
-  HOSTNAME=$(cat /etc/hostname)
-  if [[ ! $INSTALLTYPE =~ ^(MASTER|EVAL|HELIXSENSOR|MASTERSEARCH)$ ]]; then
-	if [[ $TESTHOST = *"not found"* ]] || [ -z $TESTHOST ] || [[ $TESTHOST = *"connection timed out"* ]]; then
-	  if ! grep -q $MSRVIP /etc/hosts; then
-		echo "$MSRVIP   $MSRV" >> /etc/hosts
-	  fi
-	fi
-  fi
-
-}
-
 set_hostname_iso() {
 
-	hostnamectl set-hostname --static $HOSTNAME
+	hostnamectl set-hostname --static "$HOSTNAME"
 	echo "127.0.0.1   $HOSTNAME $HOSTNAME.localdomain localhost localhost.localdomain localhost4 localhost4.localdomain" > /etc/hosts
-	echo "::1   localhost localhost.localdomain localhost6 localhost6.localdomain6" >> /etc/hosts
-	echo $HOSTNAME > /etc/hostname
+	echo "::1   $HOSTNAME $HOSTNAME localhost localhost.localdomain localhost6 localhost6.localdomain6" >> /etc/hosts
+	echo "$HOSTNAME" > /etc/hostname
 
 }
 
 set_initial_firewall_policy() {
 
   get_main_ip
-  if [ $INSTALLTYPE = 'MASTER' ]; then
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/minions.sls
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/masterfw.sls
-	/opt/so/saltstack/pillar/data/addtotab.sh mastertab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM
-  fi
 
-  if [ $INSTALLTYPE = 'EVAL' ] || [ $INSTALLTYPE = 'MASTERSEARCH' ]; then
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/minions.sls
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/masterfw.sls
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/forward_nodes.sls
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/search_nodes.sls
-	  if [ $INSTALLTYPE = 'EVAL' ]; then
-		/opt/so/saltstack/pillar/data/addtotab.sh evaltab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM bond0
-	  elif [ $INSTALLTYPE = 'MASTERSEARCH' ]; then
-		/opt/so/saltstack/pillar/data/addtotab.sh nodestab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM
-	  fi
-  fi
-
-  if [ $INSTALLTYPE = 'HELIXSENSOR' ]; then
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/minions.sls
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/masterfw.sls
-	printf "  - $MAINIP\n" >> /opt/so/saltstack/pillar/firewall/forward_nodes.sls
-  fi
-
-  if [ $INSTALLTYPE = 'SENSOR' ]; then
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh minions $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh forward_nodes $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/data/addtotab.sh sensorstab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM bond0
-  fi
-
-  if [ $INSTALLTYPE = 'SEARCHNODE' ]; then
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh minions $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh search_nodes $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/data/addtotab.sh nodestab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM
-  fi
-
-  if [ $INSTALLTYPE = 'HEAVYNODE' ]; then
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh minions $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh forward_nodes $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh search_nodes $MAINIP
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/data/addtotab.sh sensorstab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM bond0
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/data/addtotab.sh nodestab $MINION_ID $MAINIP $CPUCORES $RANDOMUID $MAININT $FSROOT $FSNSM
-  fi
-
-  if [ $INSTALLTYPE = 'FLEET' ]; then
-	ssh -i /root/.ssh/so.key soremote@$MSRV sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh minions $MAINIP
-  fi
-
-  if [ $INSTALLTYPE = 'PARSINGNODE' ]; then
-	echo "blah"
-  fi
-
-  if [ $INSTALLTYPE = 'HOTNODE' ]; then
-	echo "blah"
-  fi
-
-  if [ $INSTALLTYPE = 'WARMNODE' ]; then
-	echo "blah"
-  fi
-
+	case "$INSTALLTYPE" in
+		'MASTER')
+			printf "  - %s\n" "$MAINIP" | tee /opt/so/saltstack/pillar/firewall/minions.sls /opt/so/saltstack/pillar/firewall/masterfw.sls
+			/opt/so/saltstack/pillar/data/addtotab.sh mastertab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM"
+			;;
+		'EVAL' | 'MASTERSEARCH')
+			printf "  - %s\n" "$MAINIP" | tee /opt/so/saltstack/pillar/firewall/minions.sls\
+				/opt/so/saltstack/pillar/firewall/masterfw.sls\
+				/opt/so/saltstack/pillar/firewall/forward_nodes.sls\
+				/opt/so/saltstack/pillar/firewall/search_nodes.sls
+			case "$INSTALLTYPE" in 
+				'EVAL')
+					/opt/so/saltstack/pillar/data/addtotab.sh evaltab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM" bond0
+					;;
+				'MASTERSEARCH')
+					/opt/so/saltstack/pillar/data/addtotab.sh nodestab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM"
+					;;
+			esac
+			;;
+		'HELIXSENSOR')
+			printf "  - %s\n" "$MAINIP" | tee /opt/so/saltstack/pillar/firewall/minions.sls\
+				/opt/so/saltstack/pillar/firewall/masterfw.sls\
+				/opt/so/saltstack/pillar/firewall/forward_nodes.sls
+			;;
+		'SENSOR' | 'SEARCHNODE' | 'HEAVYNODE' | 'FLEET')
+			ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh minions "$MAINIP"
+			case "$INSTALLERTYPE" in
+				'SENSOR')
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh forward_nodes "$MAINIP"
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/data/addtotab.sh sensorstab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM" bond0
+					;;
+				'SEARCHNODE')
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh search_nodes "$MAINIP"
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/data/addtotab.sh nodestab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM"
+					;;
+				'HEAVYNODE')
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh forward_nodes "$MAINIP"
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/firewall/addfirewall.sh search_nodes "$MAINIP"
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/data/addtotab.sh sensorstab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM" bond0
+					ssh -i /root/.ssh/so.key soremote@"$MSRV" sudo /opt/so/saltstack/pillar/data/addtotab.sh nodestab "$MINION_ID" "$MAINIP" "$CPUCORES" "$RANDOMUID" "$MAININT" "$FSROOT" "$FSNSM"
+					;;
+			esac
+			;;
+		'PARSINGNODE')
+			# TODO: implement
+			;;
+		'HOTNODE')
+			# TODO: implement
+			;;
+		'WARMNODE')
+			# TODO: implement
+			;;
+	esac
 }
 
 # Set up the management interface on the ISO
 set_management_interface() {
 
-	if [ $ADDRESSTYPE = 'DHCP' ]; then
-		/usr/bin/nmcli con up $MNIC
-		/usr/bin/nmcli con mod $MNIC connection.autoconnect yes
+	if [ "$ADDRESSTYPE" = 'DHCP' ]; then
+		nmcli con mod "$MNIC" connection.autoconnect yes
+		nmcli con up "$MNIC"
 	else
 		# Set Static IP
-		/usr/bin/nmcli con mod $MNIC ipv4.addresses $MIP/$MMASK ipv4.gateway $MGATEWAY \
-		ipv4.dns $MDNS ipv4.dns-search $MSEARCH ipv4.method manual
-		/usr/bin/nmcli con up $MNIC
-		/usr/bin/nmcli con mod $MNIC connection.autoconnect yes
+		nmcli con mod "$MNIC" ipv4.addresses "$MIP"/"$MMASK"\
+			ipv4.gateway "$MGATEWAY" \
+			ipv4.dns "$MDNS"\
+			ipv4.dns-search "$MSEARCH"\
+			connection.autoconnect yes\
+			ipv4.method manual
+		nmcli con up "$MNIC"
 	fi
-
 }
 
 set_node_type() {
 
-  # Determine the node type based on whiplash choice
-  if [ $INSTALLTYPE = 'SEARCHNODE' ] || [ $INSTALLTYPE = 'EVAL' ] || [ $INSTALLTYPE = 'MASTERSEARCH' ] || [ $INSTALLTYPE = 'HEAVYNODE' ] ; then
-	NODETYPE='search'
-  fi
-  if [ $INSTALLTYPE = 'PARSINGNODE' ]; then
-	NODETYPE='parser'
-  fi
-  if [ $INSTALLTYPE = 'HOTNODE' ]; then
-	NODETYPE='hot'
-  fi
-  if [ $INSTALLTYPE = 'WARMNODE' ]; then
-	NODETYPE='warm'
-  fi
-
+	case "$INSTALLTYPE" in
+		'SEARCHNODE' | 'EVAL' | 'MASTERSEARCH' | 'HEAVYNODE')
+			NODETYPE='search'
+			;;
+		'PARSINGNODE')
+			NODETYPE='parser'
+			;;
+		'HOTNODE')
+			NODETYPE='hot'
+			;;
+		'WARMNODE')
+			NODETYPE='warm'
+			;;
+	esac
 }
 
 set_updates() {
-	if [ "$MASTERUPDATES" = 1 ]; then
-		echo "MASTERUPDATES is MASTER"
-		if [ $OS = 'centos' ]; then
-			if ! grep -q $MSRV /etc/yum.conf; then
-			echo "proxy=http://$MSRV:3142" >> /etc/yum.conf
+	if [ "$MASTERUPDATES" -eq 1 ]; then
+		if [ "$OS" = 'centos' ]; then
+			if ! grep -q "$MSRV" /etc/yum.conf; then
+				echo "proxy=http://$MSRV:3142" >> /etc/yum.conf
 			fi
 		else
-		# Set it up so the updates roll through the master
-		echo "Acquire::http::Proxy \"http://$MSRV:3142\";" > /etc/apt/apt.conf.d/00Proxy
-		echo "Acquire::https::Proxy \"http://$MSRV:3142\";" >> /etc/apt/apt.conf.d/00Proxy
+			# Set it up so the updates roll through the master
+			printf '%s\n'\
+				"Acquire::http::Proxy \"http://$MSRV:3142\";"\
+				"Acquire::https::Proxy \"http://$MSRV:3142\";" > /etc/apt/apt.conf.d/00Proxy
 		fi
-	else
-		echo "MASTERUPDATES is OPEN"
 	fi
 }
 
+# FIXME: should this be a function?
 set_version() {
-  # Drop a file with the current version
-  echo "$SOVERSION" > /etc/soversion
+	# Drop a file with the current version
+	echo "$SOVERSION" > /etc/soversion
 }
 
 update_sudoers() {
@@ -1463,5 +1395,4 @@ update_sudoers() {
 	else
 		echo "User soremote already granted sudo privileges"
 	fi
-
 }
