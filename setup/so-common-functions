@@ -39,7 +39,7 @@ set_defaul_log_size() {
 	fi
 	local disk_size_kb
 	disk_size_kb=$(df $disk_dir |grep -v "^Filesystem" | awk '{print $2}')
-	local percentage=85
+	local percentage=80
 	local disk_size
 	disk_size=$(( disk_size_kb * 1000 ))
 	local percentage_disk_space

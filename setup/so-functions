@@ -323,7 +323,8 @@ configure_minion() {
 
 	printf '%s\n'\
 		"use_superseded:"\
-		"  - module.run" >> "$minion_config"
+		"  - module.run"\
+		"log_file: /opt/so/log/salt/minion" >> "$minion_config"
 
 	service salt-minion restart
 
@@ -809,12 +810,15 @@ master_static() {
 		"  fleet_master: False"\
 		"  fleet_node: False"\
 		"  fleet_packages-timestamp: N/A"\
+		"  fleet_packages-version: 1"\
 		"  fleet_hostname: N/A"\
 		"  fleet_ip: N/A"\
-		"  sensoronikey: $SENSORONIKEY" 
-		"  masterupdate: $MASTERUPDATES" > "$static_pillar"
-	echo "elastic:" >> /opt/so/saltstack/pillar/static.sls
-	echo "  features: False" >> /opt/so/saltstack/pillar/static.sls
+		"  strelka: $STRELKA"\
+		"  wazuh: $WAZUH"\
+		"  sensoronikey: $SENSORONIKEY"\
+		"  masterupdate: $MASTERUPDATES"\
+		"elastic:"\
+		"  features: False" > "$static_pillar"
 }
 
 minio_generate_keys() {
@@ -842,7 +846,7 @@ network_setup() {
 		fi
 
 		echo "... Copying 99-so-checksum-offload-disable";
-		cp "$./install_scripts/99-so-checksum-offload-disable" /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable ;
+		cp ./install_scripts/99-so-checksum-offload-disable /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable;
 
 		echo "... Modifying 99-so-checksum-offload-disable";
 		sed -i "s/\$MAININT/${MAININT}/g" /etc/NetworkManager/dispatcher.d/pre-up.d/99-so-checksum-offload-disable;
@@ -931,16 +935,13 @@ saltify() {
 	# Install updates and Salt
 	if [ $OS = 'centos' ]; then
 		case "$install_type" in
-			'MASTER' | 'EVAL' | 'MASTERSEARCH' | 'FLEET') # FIXME: should this be separate?
-				yum instal -y mariadb-devel
-				;;
-			'HELIXSENSOR')
+			'MASTER' | 'EVAL' | 'MASTERSEARCH' | 'FLEET' | 'HELIXSENSOR')
 				reserve_group_ids
 				yum -y install epel-release
 				yum -y install wget https://repo.saltstack.com/py3/redhat/salt-py3-repo-latest-2.el7.noarch.rpm
 				cp /etc/yum.repos.d/salt-py3-latest.repo /etc/yum.repos.d/salt-py3-2019-2.repo
 				sed -i 's/latest/2019.2/g' /etc/yum.repos.d/salt-py3-2019-2.repo
-				yum -y install sqlite3 argon2 curl jq openssl
+				yum -y install sqlite3 argon2 curl jq openssl mariadb-devel
 				# Download Ubuntu Keys in case master updates = 1
 				mkdir -p /opt/so/gpg
 				wget --inet4-only -O /opt/so/gpg/SALTSTACK-GPG-KEY.pub https://repo.saltstack.com/apt/ubuntu/16.04/amd64/latest/SALTSTACK-GPG-KEY.pub
@@ -1004,19 +1005,17 @@ saltify() {
 		local ubuntu_version
 		ubuntu_version=$(grep VERSION_ID /etc/os-release | awk -F '[ "]' '{print $2}')
 
+		if [ "$OSVER" != "xenial" ]; then local repo_ver_string="py3"; else local repo_ver_string="apt"; fi
+
+		# Add saltstack repo(s)
+		wget --inet4-only -O - https://repo.saltstack.com/"$repo_ver_string"/ubuntu/"$ubuntu_version"/amd64/3000/SALTSTACK-GPG-KEY.pub | apt-key add -
+		wget --inet4-only -O - https://repo.saltstack.com/"$repo_ver_string"/ubuntu/"$ubuntu_version"/amd64/2019.2/SALTSTACK-GPG-KEY.pub | apt-key add -
+		echo "deb http://repo.saltstack.com/$repo_ver_string/ubuntu/$ubuntu_version/amd64/latest $OSVER main" > /etc/apt/sources.list.d/saltstack.list
+		echo "deb http://repo.saltstack.com/$repo_ver_string/ubuntu/$ubuntu_version/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack2019.list
+
 		case "$install_type" in
-			'FLEET')
-				if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-mysqldb >> "$setup_log" 2>&1; else apt-get -y install python-mysqldb >> "$setup_log" 2>&1; fi
-				;;
+
 			'MASTER' | 'EVAL' | 'MASTERSEARCH') # TODO: should this also be HELIXSENSOR?
-				if [ "$OSVER" != "xenial" ]; then local py_ver_url_path="/py3"; else local py_ver_url_path="/apt"; fi
-
-				# Add saltstack repo(s)
-				wget --inet4-only -O - https://repo.saltstack.com"$py_ver_url_path"/ubuntu/"$ubuntu_version"/amd64/3000/SALTSTACK-GPG-KEY.pub | apt-key add -
-				wget --inet4-only -O - https://repo.saltstack.com"$py_ver_url_path"/ubuntu/"$ubuntu_version"/amd64/2019.2/SALTSTACK-GPG-KEY.pub | apt-key add -
-				echo "deb http://repo.saltstack.com/py3/ubuntu/$ubuntu_version/amd64/latest $OSVER main" > /etc/apt/sources.list.d/saltstack.list
-				echo "deb http://repo.saltstack.com/py3/ubuntu/$ubuntu_version/amd64/2019.2 $OSVER main" > /etc/apt/sources.list.d/saltstack2019.list
-
 				# Add Docker repo
 				curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 				add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
@@ -1035,7 +1034,6 @@ saltify() {
 				apt-get update >> "$setup_log" 2>&1
 				# FIXME: Install salt-master on Ubuntu?
 				apt-get -y install sqlite3 argon2 openssl >> "$setup_log" 2>&1
-				if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-mysqldb >> "$setup_log" 2>&1; else apt-get -y install python-mysqldb >> "$setup_log" 2>&1; fi
 				;;
 			*)
 				# Copy down the gpg keys and install them from the master
@@ -1053,7 +1051,7 @@ saltify() {
 		apt-get -y install salt-minion=2019.2.3+ds-1\
 					salt-common=2019.2.3+ds-1 >> "$setup_log" 2>&1
 		apt-mark hold salt-minion salt-common
-		if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-dateutil python3-m2crypto >> "$setup_log" 2>&1; else apt-get -y install python-dateutil python-m2crypto >> "$setup_log" 2>&1; fi
+		if [ "$OSVER" != 'xenial' ]; then apt-get -y install python3-dateutil python3-m2crypt python3-mysqldb o >> "$setup_log" 2>&1; else apt-get -y install python-dateutil python-m2crypto python-mysqldb  >> "$setup_log" 2>&1; fi
 	fi
 
 }
